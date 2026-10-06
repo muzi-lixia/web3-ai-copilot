@@ -1,0 +1,16 @@
+# Web3 AI Copilot 后端依赖
+# 只列直接依赖并锁定当前实际安装的版本；传递依赖（aiohttp、eth-abi、starlette 等）由 pip 自动解析。
+
+# --- 运行时 ---
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+httpx==0.28.1
+web3==8.0.0
+openai==3.24.0
+
+# --- 开发工具（测试 / lint，部署时可不要）---
+ruff==0.16.10
+pytest==9.1.1
+pytest-asyncio==1.4.0
