@@ -156,7 +156,7 @@ export default function Dashboard() {
             type="error"
             showIcon
             style={{ marginBottom: 16 }}
-            message="读取资产失败"
+            title="读取资产失败"
             description={
               assetsQuery.error instanceof Error
                 ? assetsQuery.error.message
@@ -204,7 +204,7 @@ export default function Dashboard() {
             type="warning"
             showIcon
             style={{ marginTop: 16 }}
-            message={`${data.missing_price.join('、')} 没有行情，未计入总资产`}
+            title={`${data.missing_price.join('、')} 没有行情，未计入总资产`}
             description="报价可能缺失或数据源暂不可用，本次只展示已知估值。"
           />
         )}
@@ -220,7 +220,7 @@ export default function Dashboard() {
             type="error"
             showIcon
             style={{ marginBottom: 16 }}
-            message="读取风险报告失败"
+            title="读取风险报告失败"
             description={
               riskQuery.error instanceof Error ? riskQuery.error.message : String(riskQuery.error)
             }

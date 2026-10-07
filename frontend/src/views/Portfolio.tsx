@@ -188,7 +188,7 @@ export default function Portfolio() {
           type="error"
           showIcon
           style={{ marginBottom: 16 }}
-          message="读取资产失败"
+          title="读取资产失败"
           description={error instanceof Error ? error.message : String(error)}
         />
       )}
@@ -198,7 +198,7 @@ export default function Portfolio() {
           type="warning"
           showIcon
           style={{ marginBottom: 16 }}
-          message={`${data.missing_price.join('、')} 没有行情，未计入总资产`}
+          title={`${data.missing_price.join('、')} 没有行情，未计入总资产`}
           description="报价可能缺失或数据源暂不可用，本次只展示已知估值。"
         />
       )}

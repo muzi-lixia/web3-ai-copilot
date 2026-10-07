@@ -215,7 +215,7 @@ export default function Staking() {
             type="error"
             showIcon
             style={{ marginBottom: 16 }}
-            message="读取质押仓位失败"
+            title="读取质押仓位失败"
             description={error instanceof Error ? error.message : String(error)}
           />
         )}
@@ -270,7 +270,7 @@ export default function Staking() {
             type="warning"
             showIcon
             style={{ marginTop: 16 }}
-            message={`${data.missing_price.join('、')} 没有行情，质押价值未计入`}
+            title={`${data.missing_price.join('、')} 没有行情，质押价值未计入`}
             description="有质押仓位但底层资产取不到价 —— 此时数量是准的，金额不是。"
           />
         )}
