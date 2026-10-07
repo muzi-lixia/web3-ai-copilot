@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { fetchRiskReport } from '../api/risk'
 import { fetchStakingPositions } from '../api/staking'
 import { fetchWalletAssets } from '../api/wallet'
@@ -112,16 +113,19 @@ export default function Dashboard() {
 
   // 质押那一格：链上确实没仓位时是 $0.00；有仓位却取不到价时才说「估值不可用」。
   const stakingValued = Boolean(staking) && staking!.missing_price.length === 0
+    && !staking!.issues.some((issue) => issue.code === 'staking_read_failed')
   const stakingHint = !staking
     ? undefined
-    : staking.positions.length === 0
-      ? '该链未接入质押模块'
-      : staking.portfolio_ratio !== null
-        ? `占组合 ${formatRatio(staking.portfolio_ratio, 1)}`
-        : '资产侧取不到，占比不可算'
+    : staking.issues.some((issue) => issue.code === 'staking_read_failed')
+      ? '部分仓位读取失败'
+      : staking.positions.length === 0
+        ? '该链未接入质押模块'
+        : staking.portfolio_ratio !== null
+          ? `占组合 ${formatRatio(staking.portfolio_ratio, 1)}`
+          : '估值不完整或组合为空，占比不可算'
 
   return (
-    <Space direction="vertical" size={16} style={{ display: 'flex' }}>
+    <Space orientation="vertical" size={16} style={{ display: 'flex' }}>
       <Card
         title={
           <Space size={12}>
@@ -161,11 +165,12 @@ export default function Dashboard() {
           />
         )}
 
+        <DataQualityNotice data={data} />
         {data && (
           <>
             <Space align="baseline" size={12}>
               <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-                总资产
+                {data.status === 'complete' ? '钱包资产' : '钱包已知估值（部分）'}
               </Typography.Text>
               {totalKnown ? (
                 <Typography.Title level={2} style={{ margin: 0 }}>
@@ -200,7 +205,7 @@ export default function Dashboard() {
             showIcon
             style={{ marginTop: 16 }}
             message={`${data.missing_price.join('、')} 没有行情，未计入总资产`}
-            description="有持仓但取不到价，说明该币没有可查询的交易池，或它不可转让。"
+            description="报价可能缺失或数据源暂不可用，本次只展示已知估值。"
           />
         )}
       </Card>
@@ -222,9 +227,11 @@ export default function Dashboard() {
           />
         )}
 
+        <DataQualityNotice data={report} />
+        <DataQualityNotice data={staking} />
         {report && !evaluated && (
           <Typography.Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 16 }}>
-            没有可估值的持仓，风险指标无法计算 —— 这不是"低风险"。
+            持仓为空或数据不完整，风险指标无法计算。
           </Typography.Paragraph>
         )}
 

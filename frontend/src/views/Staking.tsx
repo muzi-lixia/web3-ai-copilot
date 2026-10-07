@@ -2,6 +2,7 @@ import { Alert, Card, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd
 import type { TableProps } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { fetchStakingPositions } from '../api/staking'
 import { useAuthStore } from '../stores/auth'
 import type { PendingWithdrawal, StakingPosition } from '../types/api'
@@ -32,7 +33,7 @@ const positionColumns: TableProps<StakingPosition>['columns'] = [
     title: '协议',
     key: 'name',
     render: (_, row) => (
-      <Space direction="vertical" size={0}>
+      <Space orientation="vertical" size={0}>
         <Typography.Text strong>{row.name}</Typography.Text>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           {row.protocol}
@@ -49,7 +50,7 @@ const positionColumns: TableProps<StakingPosition>['columns'] = [
     key: 'shares',
     align: 'right',
     render: (_, row) => (
-      <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+      <Space orientation="vertical" size={0} style={{ alignItems: 'flex-end' }}>
         <Typography.Text>
           {formatAmount(row.shares)} {row.share_symbol}
         </Typography.Text>
@@ -77,7 +78,7 @@ const positionColumns: TableProps<StakingPosition>['columns'] = [
     key: 'apy',
     align: 'right',
     render: (_, row) => (
-      <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+      <Space orientation="vertical" size={0} style={{ alignItems: 'flex-end' }}>
         {row.apy === null ? (
           <Typography.Text type="secondary">—</Typography.Text>
         ) : (
@@ -101,7 +102,7 @@ const positionColumns: TableProps<StakingPosition>['columns'] = [
           <Typography.Text type="secondary">—</Typography.Text>
         </Tooltip>
       ) : (
-        <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+        <Space orientation="vertical" size={0} style={{ alignItems: 'flex-end' }}>
           <Typography.Text>
             {formatAmount(row.earnings.total)} {row.underlying_symbol}
           </Typography.Text>
@@ -117,7 +118,7 @@ const positionColumns: TableProps<StakingPosition>['columns'] = [
     key: 'value_usd',
     align: 'right',
     render: (_, row) => (
-      <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+      <Space orientation="vertical" size={0} style={{ alignItems: 'flex-end' }}>
         <Typography.Text strong>{formatValue(row.value_usd)}</Typography.Text>
         {row.price_usd !== null && (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -134,7 +135,7 @@ const withdrawalColumns: TableProps<PendingWithdrawal>['columns'] = [
     title: '锁定量 / 已烧份额',
     key: 'assets',
     render: (_, row) => (
-      <Space direction="vertical" size={0}>
+      <Space orientation="vertical" size={0}>
         <Typography.Text>{formatAmount(row.assets)}</Typography.Text>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           份额 {formatAmount(row.shares)}
@@ -157,7 +158,7 @@ const withdrawalColumns: TableProps<PendingWithdrawal>['columns'] = [
     title: '可提取',
     key: 'unlock',
     render: (_, row) => (
-      <Space direction="vertical" size={0}>
+      <Space orientation="vertical" size={0}>
         <Typography.Text>{new Date(row.unlock_at).toLocaleString()}</Typography.Text>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           {remainingText(row.unlock_at)}
@@ -193,10 +194,11 @@ export default function Staking() {
   const hasPosition = positions.length > 0
   // 有仓位却取不到价 → 显示「估值不可用」；链上确实什么都没有 → $0.00。两回事。
   const valued = Boolean(data) && data!.missing_price.length === 0
+    && !data!.issues.some((issue) => issue.code === 'staking_read_failed')
   const unbonding = positions[0]?.unbonding_seconds
 
   return (
-    <Space direction="vertical" size={16} style={{ display: 'flex' }}>
+    <Space orientation="vertical" size={16} style={{ display: 'flex' }}>
       <Card
         title={
           <Space size={12}>
@@ -207,6 +209,7 @@ export default function Staking() {
         }
         loading={isFetching && !data}
       >
+        <DataQualityNotice data={data} />
         {error && (
           <Alert
             type="error"
@@ -220,7 +223,8 @@ export default function Staking() {
         {data && !hasPosition && (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="该链尚未接入质押模块，或该地址没有质押仓位"
+            description={data.issues.some((issue) => issue.code === 'staking_read_failed')
+              ? "仓位读取不完整" : "该链尚未接入质押模块，或该地址没有质押仓位"}
           />
         )}
 
@@ -287,7 +291,8 @@ export default function Staking() {
       {hasPosition && (
         <Card title="提款队列" loading={isFetching && !data}>
           {positions.every((position) => position.pending_withdrawals.length === 0) ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有排队中的赎回" />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={data?.issues.some((issue) => issue.code === 'staking_read_failed')
+              ? "已读取的仓位没有赎回；失败模块的提款队列未知" : "没有排队中的赎回"} />
           ) : (
             positions
               .filter((position) => position.pending_withdrawals.length > 0)

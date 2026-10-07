@@ -30,23 +30,26 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi.concurrency import run_in_threadpool
 
-from app.constants.chains import ChainMeta, get_chain
-from app.constants.staking import StakingModule, modules_for
-from app.constants.tokens import TokenMeta, tokens_for
-from app.core.errors import UpstreamError
-from app.core.logging import get_logger
-from app.schemas.market import TokenMarket
-from app.schemas.staking import (
+from app.api.schemas.common import DataIssue
+from app.api.schemas.market import TokenMarket
+from app.api.schemas.staking import (
     PendingWithdrawal,
     StakingEarnings,
     StakingPosition,
     StakingSummary,
 )
-from app.services import asset_service, beep, staking_vault
-from app.services import chain as chain_service
-from app.services import market_service
-from app.services.chain import to_checksum
-from app.services.units import to_human
+from app.config.constants.chains import ChainMeta, get_chain
+from app.config.constants.staking import StakingModule, modules_for
+from app.config.constants.tokens import TokenMeta, tokens_for
+from app.infra.blockchain import chain as chain_service
+from app.infra.blockchain import staking_vault
+from app.infra.blockchain.chain import to_checksum
+from app.infra.integrations import beep
+from app.infra.logging import get_logger
+from app.infra.singleflight import singleflight
+from app.services import asset_service, market_service
+from app.services.units import monetary_calculation, to_human
+from app.shared.errors import UpstreamError
 
 logger = get_logger(__name__)
 
@@ -84,6 +87,7 @@ class _Positions:
     has_valuation: bool = False
     missing_price: list[str] = field(default_factory=list)
     stale: bool = False
+    issues: list[DataIssue] = field(default_factory=list)
 
 
 async def get_summary(chain_id: int, owner: str) -> StakingSummary:
@@ -99,6 +103,13 @@ async def get_summary(chain_id: int, owner: str) -> StakingSummary:
     )
 
     return StakingSummary(
+        status="partial" if built.issues or built.missing_price or liquid is None else "complete",
+        issues=built.issues
+        + (
+            [DataIssue(code="wallet_valuation_unavailable", message="钱包估值不完整，组合占比不可计算")]
+            if liquid is None
+            else []
+        ),
         address=address,
         chain_id=chain.chain_id,
         chain_name=chain.name,
@@ -109,7 +120,9 @@ async def get_summary(chain_id: int, owner: str) -> StakingSummary:
         missing_price=built.missing_price,
         stale=built.stale,
         liquid_value_usd=liquid,
-        portfolio_ratio=_ratio(built.staked_value_usd, liquid),
+        portfolio_ratio=None
+        if built.issues or built.missing_price
+        else _ratio(built.staked_value_usd, liquid),
         computed_at=now,
     )
 
@@ -120,10 +133,13 @@ async def get_staked_slices(chain_id: int, owner: str) -> tuple[StakedSlice, ...
     返回 `None` 表示**不可知**（有仓位却取不到价），与返回空元组（测出来是零）
     是两件事 —— 前者占比该显示「—」，后者该显示 0%。
     """
-    chain = get_chain(chain_id)
-    built = await _build_positions(chain_id, to_checksum(owner), datetime.now(UTC))
+    # 这一行只为**校验**，结果刻意不绑定：链没登记时 get_chain 会抛
+    # UnsupportedChainError(400)，这是「不支持的链」与「这条链没有质押模块」
+    # 两种情况的唯一区分点。别把它当无用代码删掉 —— 删了就变成静默返回空元组。
+    get_chain(chain_id)
+    built = await _build_positions(chain_id, to_checksum(owner), datetime.now(UTC), with_earnings=False)
 
-    if built.missing_price:
+    if built.issues or built.missing_price:
         # 有仓位但一个价都取不到：此时 staked_value_usd 恒为 0，
         # 直接被当成"确实没质押"就错了。
         return None
@@ -139,7 +155,10 @@ async def get_staked_slices(chain_id: int, owner: str) -> tuple[StakedSlice, ...
     )
 
 
-async def _build_positions(chain_id: int, address: str, now: datetime) -> _Positions:
+@monetary_calculation
+async def _build_positions(
+    chain_id: int, address: str, now: datetime, *, with_earnings: bool = True
+) -> _Positions:
     """读链上 + 取行情/年化/收益，组装出仓位表。"""
     chain = get_chain(chain_id)
     modules = modules_for(chain_id)
@@ -148,10 +167,12 @@ async def _build_positions(chain_id: int, address: str, now: datetime) -> _Posit
         return _Positions()
 
     readings, quotes, apy, earnings = await asyncio.gather(
-        run_in_threadpool(_read_positions, chain, modules, address),
+        _load_readings(chain_id, address),
         _load_quotes(chain, modules),
-        beep.get_stake_apy_safe(),
-        beep.gather_earnings([module.vault for module in modules], address),
+        beep.get_stake_apy_safe() if with_earnings else asyncio.sleep(0, result=None),
+        beep.gather_earnings([module.vault for module in modules], address)
+        if with_earnings
+        else asyncio.sleep(0, result={}),
     )
 
     built = _Positions()
@@ -161,6 +182,13 @@ async def _build_positions(chain_id: int, address: str, now: datetime) -> _Posit
             # 单个模块读不出来：跳过它而不是让整页消失。日志里留痕 ——
             # "少了一个模块"在界面上看不出是读失败还是真的没仓位。
             logger.error("质押模块 %s 读取失败，本次跳过", module.key)
+            built.issues.append(
+                DataIssue(
+                    code="staking_read_failed",
+                    asset=module.key,
+                    message=f"{module.name} 仓位或提款队列读取不完整",
+                )
+            )
             continue
 
         underlying = _resolve_underlying(chain_id, module, reading.asset)
@@ -171,9 +199,7 @@ async def _build_positions(chain_id: int, address: str, now: datetime) -> _Posit
         # 链上读不到解绑时长时退回注册表声明值，而不是当成 0 ——
         # 那会让所有排队中的请求立刻显示"已可提取"。
         cooldown = (
-            reading.cooldown_seconds
-            if reading.cooldown_seconds is not None
-            else module.unbonding_seconds
+            reading.cooldown_seconds if reading.cooldown_seconds is not None else module.unbonding_seconds
         )
 
         # 排队中的锁定量也计入仓位：解绑期一过它就是可提取的资产，
@@ -190,6 +216,13 @@ async def _build_positions(chain_id: int, address: str, now: datetime) -> _Posit
         elif claim_units != 0:
             # 只报**有仓位**却没价的：空仓位没价不影响任何判断。
             built.missing_price.append(underlying.symbol)
+            built.issues.append(
+                DataIssue(
+                    code="price_unavailable",
+                    asset=underlying.symbol,
+                    message=f"{underlying.symbol} 质押仓位缺少报价",
+                )
+            )
 
         built.positions.append(
             StakingPosition(
@@ -207,8 +240,7 @@ async def _build_positions(chain_id: int, address: str, now: datetime) -> _Posit
                 apy_interval=apy.interval if apy is not None else None,
                 earnings=_to_earnings(earnings.get(module.vault.lower()), underlying.decimals),
                 pending_withdrawals=[
-                    _to_pending(item, module, underlying, cooldown, price, now)
-                    for item in reading.pending
+                    _to_pending(item, module, underlying, cooldown, price, now) for item in reading.pending
                 ],
                 unbonding_seconds=cooldown,
             )
@@ -252,16 +284,17 @@ def _read_positions(
     但**全部失败时抛错** —— 那种情况说明 RPC 或读取层坏了，返回空字典会被界面
     读成"你没有质押"，是把故障伪装成事实。
     """
-    w3 = chain_service.connect(chain)
     out: dict[str, staking_vault.VaultReading] = {}
     failures: list[str] = []
 
     for module in modules:
         try:
-            out[module.key] = staking_vault.read_vault(w3, chain, module, address)
+            out[module.key] = chain_service.read_with_failover(
+                chain, lambda w3, module=module: staking_vault.read_vault(w3, chain, module, address)
+            )
         except Exception as exc:  # noqa: BLE001 —— 合约异常类型很多，逐个记录后继续
-            failures.append(f"{module.key} ({type(exc).__name__}: {exc})")
-            logger.warning("质押模块 %s 读取失败：%s", module.key, exc)
+            failures.append(f"{module.key} ({type(exc).__name__})")
+            logger.warning("质押模块 %s 读取失败：%s", module.key, type(exc).__name__)
 
     if not out:
         raise UpstreamError(f"{chain.name} 的质押模块全部读取失败：{'; '.join(failures)}")
@@ -279,11 +312,7 @@ def _resolve_underlying(chain_id: int, module: StakingModule, onchain_asset: str
 
     if onchain_asset:
         matched = next(
-            (
-                token
-                for token in tokens
-                if token.address and token.address.lower() == onchain_asset.lower()
-            ),
+            (token for token in tokens if token.address and token.address.lower() == onchain_asset.lower()),
             None,
         )
         if matched is not None:
@@ -314,6 +343,7 @@ def _resolve_underlying(chain_id: int, module: StakingModule, onchain_asset: str
     return declared
 
 
+@monetary_calculation
 def _exchange_rate(reading: staking_vault.VaultReading) -> Decimal | None:
     """1 份份额值多少底层。
 
@@ -339,6 +369,7 @@ def _to_earnings(raw: beep.StakeEarnings | None, decimals: int) -> StakingEarnin
     )
 
 
+@monetary_calculation
 def _ratio(staked: Decimal, liquid: Decimal | None) -> float | None:
     """质押 ÷（质押 + 资产）。
 
@@ -372,4 +403,11 @@ async def _load_liquid_value(chain_id: int, address: str) -> Decimal | None:
     except UpstreamError as exc:
         logger.warning("资产侧不可用，本次不给出质押占比：%s", exc)
         return None
+    if wallet.status != "complete" or wallet.missing_price:
+        return None
     return wallet.total_value_usd
+
+
+@singleflight
+async def _load_readings(chain_id: int, address: str):
+    return await run_in_threadpool(_read_positions, get_chain(chain_id), modules_for(chain_id), address)

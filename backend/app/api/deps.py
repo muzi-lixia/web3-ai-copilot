@@ -2,8 +2,8 @@
 
 from fastapi import Header
 
-from app.core.errors import UnauthorizedError
 from app.services import auth_service
+from app.shared.errors import UnauthorizedError
 
 
 async def get_current_address(authorization: str | None = Header(default=None)) -> str:

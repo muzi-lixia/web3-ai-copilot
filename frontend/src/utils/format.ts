@@ -14,7 +14,8 @@
  * 再多的位数对"我持有多少"这个判断没有帮助，但也不能直接砍成 0 ——
  * 小于 1e-6 的非零余额显示成 `<0.000001`，否则会被误读成"这个币没有余额"。
  */
-export function formatAmount(amount: string): string {
+export function formatAmount(amount: string | null): string {
+  if (amount === null) return "—"
   const [int, frac = ''] = amount.split('.')
   const head = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const tail = frac.slice(0, 6).replace(/0+$/, '')

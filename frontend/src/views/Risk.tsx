@@ -2,6 +2,7 @@ import { Alert, Card, Col, Empty, Row, Space, Tag, Typography } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { fetchRiskReport } from '../api/risk'
 import { LEVEL_META, RiskBadge } from '../components/RiskBadge'
 import { useAuthStore } from '../stores/auth'
@@ -75,6 +76,7 @@ export default function Risk() {
   return (
     <Space orientation="vertical" size={16} style={{ display: 'flex' }}>
       <Card title="资产风险" loading={isFetching && !data}>
+        <DataQualityNotice data={data} />
         {error && (
           <Alert
             type="error"
@@ -88,7 +90,7 @@ export default function Risk() {
         {data && !evaluated && (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="没有可估值的持仓，无法评估风险"
+            description="持仓为空或数据不完整，无法评估风险"
           />
         )}
 
@@ -127,7 +129,7 @@ export default function Risk() {
                 <Col xs={24} sm={8}>
                   <Metric
                     title="风险资产集中度"
-                    value={data.concentration_score.toFixed(1)}
+                    value={data.concentration_score?.toFixed(1) ?? null}
                     hint="波动资产内部的 HHI，0-100，越高越集中"
                   />
                 </Col>

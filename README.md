@@ -7,15 +7,32 @@
 
     backend/      FastAPI + 链上数据 + Agent + RAG
       app/
-        core/         配置、日志、异常
-        api/          路由层（薄，只做校验）
-        schemas/      前后端契约的唯一真源
-        services/     业务逻辑（不依赖 HTTP，可单测）
-        tools/        Agent 工具定义与注册表
-        agents/       LangGraph 编排（V2）
-        rag/          检索链路（V2，pgvector）
-        constants/    链注册表 + token 候选表 + 质押模块表（决定连哪条链、读哪些合约）
-      scripts/       后端运维脚本（RAG 索引导入等）
+        api/
+          routes/     HTTP 路由（auth / wallet / market / risk / staking）
+          schemas/    接口数据契约（含预留 Agent / SSE 契约）
+          deps.py     认证依赖
+          exception_handlers.py  HTTP 异常映射
+        services/     业务用例、估值与风险计算
+        agents/       Agent 工作流（预留）
+        tools/        业务工具适配（预留）
+        llm/          模型客户端（client.py）
+        rag/          索引与检索（预留）
+        memory/       对话上下文管理（预留）
+        repositories/ 持久化访问（预留）
+        models/       数据库实体（预留）
+        infra/
+          blockchain/ RPC、Multicall、质押合约读取
+          integrations/ Beep 数据源适配
+          logging.py  基础日志
+        guardrails/   模型与工具内容检查（预留）
+        observability/ 执行追踪与指标（预留）
+        workers/      后台任务入口（预留）
+        config/
+          settings.py 环境配置
+          constants/  链、Token、质押模块注册表
+        shared/       不依赖 HTTP 的业务异常
+      scripts/        模型连通与常量核对脚本
+      tests/          业务计算、模型配置与 HTTP 集成测试
     frontend/     React 19 + Vite + antd
       src/
         api/          与后端路由一一对应，client.ts 统一请求与错误
@@ -28,6 +45,21 @@
     contracts/    独立 Solidity 工程（尚未开始；与 backend 分离，仅通过 ABI 对接）
     docs/         RAG 语料
     evaluation/   Agent & RAG 评测（V3）
+
+## 后端分层约定
+
+- HTTP 入口在 `api/routes`；现有 URL、请求字段和响应字段保持不变。
+- `services` 承载业务用例与确定性计算，复用 `api/schemas` 中的数据契约。
+  Schema 仅定义数据，不依赖路由或请求对象；数据库实体单独放在 `models`。
+- RPC 与合约读取在 `infra/blockchain`，Beep 在 `infra/integrations`。
+  行情服务目前仍包含报价来源适配及缓存，后续可随业务迭代拆分。
+- 业务异常在 `shared/errors.py`，HTTP 错误响应统一由 `api/exception_handlers.py` 转换。
+- 页面路由与未来 Agent 工具复用同一套业务服务；工具不经内部 HTTP 再调用本服务。
+- 后续聊天服务负责会话与运行生命周期，Agent 负责模型与工具编排；
+  `memory` 负责上下文裁剪与摘要，消息持久化由 Repository 负责。
+- `config/constants` 保留分文件注册表，避免将链、Token 与质押配置合并成一个大文件。
+- 标记为“预留”的包当前只有职责说明，尚无数据库、队列、Agent 或 RAG 实现。
+  本次目录迁移不代表这些业务能力已经完成。
 
 ## 本地启动
 
@@ -56,13 +88,17 @@
 - 接口文档：http://127.0.0.1:8000/docs
 - 前端：http://localhost:5173 → 登录后落在总览页；侧边栏可切到资产 / 行情 / 风险 / 质押
   （这四页的数据已接通），Copilot / Knowledge 仍是占位
+- 模型出口：`cd backend && .venv/bin/python scripts/check_model.py` —— 实打一次，
+  确认真的连得上、模型名没拼错、真能出字。**对话功能写之前先过这一关**：
+  模型配置的错误大多是静默的，等到提问时才暴露会先被怀疑成业务代码写错了
+- 常量表：`cd backend && .venv/bin/python scripts/verify_constants.py`
 
 ## 支持的链
 
 目前只接入 **Berachain**（chain_id `80094`，原生币 BERA）。
 
-链参数集中在 `backend/app/constants/chains.py`（chain_id / 原生币 / Multicall3 / 公共 RPC /
-浏览器 / 两个行情源的链标识），各链读哪些 token 在 `backend/app/constants/tokens.py`。
+链参数集中在 `backend/app/config/constants/chains.py`（chain_id / 原生币 / Multicall3 / 公共 RPC /
+浏览器 / 两个行情源的链标识），各链读哪些 token 在 `backend/app/config/constants/tokens.py`。
 **新增一条链 = 各加一条条目**，读取层、服务层、路由都不用改。当前链由 `DEFAULT_CHAIN_ID`
 决定，接口也支持按请求传 `chain_id`。
 
@@ -106,7 +142,8 @@
 | POST | `/api/v1/auth/verify` | `{address, signature}` → `{token, address, expires_at}` |
 | GET | `/api/v1/auth/me` | 需 Bearer token → `{address}` |
 
-`JWT_SECRET` 本地留空即可（用代码里的开发默认值），**上生产必须设置**，否则任何人都能伪造凭证。
+`JWT_SECRET` 本地可不设置（使用开发默认值）。生产设置 `ENVIRONMENT=production`、
+`DEBUG=false`、至少 32 字节的独立随机密钥和实际 `SIWE_DOMAIN`；不满足时拒绝启动。
 生成方式见 `backend/.env.example`。
 
 > **为什么不用「请求头带钱包地址」当登录。** 那种做法（连接钱包后把地址放进
@@ -158,7 +195,10 @@ DefiLlama 的行必然只有价格，涨跌与市值/成交量显示为 `—`。
 
 原生币 BERA 没有合约可查，行情借用 WBERA（1:1 锚定）—— 登记在 `TokenMeta.price_address`。
 
-后端缓存 60 秒（`MARKET_CACHE_TTL`）；上游全挂时退回过期缓存，并把这一批标为 `stale`。
+后端缓存 60 秒（`MARKET_CACHE_TTL`）；上游失败时最多再使用 300 秒
+（`MARKET_MAX_STALE_SECONDS`），并标为 `stale`。报价本身的时间也受两者之和约束。
+超过期限的报价不参与估值。反算 quote token 时仅返回价格，不沿用 base token 的涨跌与市值；
+FDV 不再替代流通市值。
 
 ## 资产风险
 
@@ -251,7 +291,42 @@ DefiLlama 的行必然只有价格，涨跌与市值/成交量显示为 `—`。
 
 质押凭证 sWBERA **故意不进 token 清单**：它若进了，资产页和质押页会各展示一次同一个仓位，
 `total_value_usd` 也会重复计入，风险报告里的「质押占比」会算出大于 100%。
-质押模块登记在 `backend/app/constants/staking.py`，**加模块 = 加一条 `StakingModule`**。
+质押模块登记在 `backend/app/config/constants/staking.py`，**加模块 = 加一条 `StakingModule`**。
+
+## 模型出口（可切换）
+
+对话能力还没接（见「进度」），模型出口已经封好了 —— `backend/app/llm/client.py`。
+**换平台只改一个环境变量**，加一个平台就是在 `PLATFORMS` 里加一行。
+
+| `MODEL_PROVIDER` | 默认模型 | 需要 key | key 的环境变量 |
+|---|---|---|---|
+| `ollama`（默认） | `qwen2.5:7b` | 否 | —（本地，不出网） |
+| `deepseek` | `deepseek-chat` | 是 | `DEEPSEEK_API_KEY` |
+| `qwen` | `qwen-plus` | 是 | `DASHSCOPE_API_KEY` |
+| `openai` | `gpt-4o-mini` | 是 | `OPENAI_API_KEY` |
+
+    from app.llm.client import get_client
+
+    llm = get_client()                                     # 按 MODEL_PROVIDER 选
+    resp = await llm.ainvoke([{"role": "user", "content": "你好"}])
+
+用 LangChain 的 `ChatOpenAI`。四家都提供 OpenAI 兼容的 `/chat/completions`，所以切平台就是换
+`base_url` 与 key。模型名、`temperature`、`max_tokens` 都绑在 client 上，取一次到处用；
+其余参数走 `**kwargs` 透传 —— `get_client(temperature=0.2, max_tokens=1024)`。
+
+有一个坑要记：**LangChain 里字段名拼错不报错** —— 只给一条 warning 就把参数塞进 `model_kwargs`，
+参数等于没生效。超时字段叫 `request_timeout` 而**不是** `timeout`。有单测钉住「传进去 = 读得到」。
+
+配完先实打一次 —— 配置错误的症状大多是静默的（key 填错只在真正提问时才 401，
+模型名拼错只会得到空回复）：
+
+    cd backend && .venv/bin/python scripts/check_model.py
+
+它做两件事：`models.list()` 证明连通、核对模型名在不在列表里；再发一句最小请求证明真能出字。
+**已实测（2026-10-07，本机 Ollama）**：`ollama list` 只有 `bge-m3`（向量模型，不能对话）
+与 `deepseek-r1:7b`，后者连通、能对话。要用本地模型先 `ollama pull qwen2.5:7b`。
+另外留一条给 ⑤ 的记录：**`deepseek-r1` 这类推理模型收到 `tools` 会当没看见** ——
+不报错、直接用自己印象回答，接工具链路时不能拿它当脑子。
 
 ## 总览页
 
@@ -269,6 +344,33 @@ DefiLlama 的行必然只有价格，涨跌与市值/成交量显示为 `—`。
 质押那一格的三种状态是分开的：该链没接质押模块 → `$0.00`；有仓位且算得出价 → 金额；
 有仓位但取不到价 → 「—」。合成一个「—」会把「确实没质押」和「没测到」混掉。
 
+## 数据完整性与单进程部署
+
+钱包、质押、风险响应增加 `status`（complete / partial / unavailable）与 `issues`。
+余额读取失败时 `amount=null`；报价缺失或余额未知时只展示已知估值，前端明确标注部分数据。
+钱包或质押估值不完整时，组合占比为 null，风险报告为 unknown，相关指标也为 null。
+集中度按底层价格敞口归并 BERA / WBERA / sWBERA，仓位明细仍单列。
+提款明细读取失败时整个模块视为不完整，不从总额中静默扣除；所有模块失败返回 502。
+
+金额从链上整数精确转换；金额运算使用调用局部的 512 位 Decimal 精度，展示边界再舍入。
+同一次钱包或金库读取固定区块高度；RPC 传输异常可切换节点，合约执行错误不盲目重试。
+同一事件循环内并发的相同余额、报价和仓位读取会合并，单个调用取消不会取消其他调用。
+风险读取不请求 Beep 年化与历史收益。
+
+本阶段不使用 Redis，**部署只支持一个实例、一个 worker**：
+
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+
+nonce 有 TTL、容量上限和每分钟清理，消费受线程锁保护。nonce / verify 共用每个客户端 IP
+的每分钟额度（默认 30 次），超过返回 429。限流状态同样有容量上限与过期回收。
+应用不自行信任 X-Forwarded-For；位于反向代理后时，需由服务器仅信任实际代理的转发头，
+避免所有用户共用代理 IP 额度或客户端伪造 IP。
+重启会使未完成的 nonce 登录失效；密钥不变时已签发 JWT 仍有效。
+多个 worker / 多实例需要共享 nonce 存储，不能直接增加 worker 数。
+
+离线回归：`cd backend && .venv/bin/python -m pytest -q`。
+模型配置单测隔离本机代理与模型环境变量；真实连通性仍由 `scripts/check_model.py` 检查。
+
 ## 环境说明
 
 **行情取不到价？** 行情源（DexScreener / DefiLlama）需要外网可达。若环境里的 `HTTP_PROXY`
@@ -278,7 +380,7 @@ DefiLlama 的行必然只有价格，涨跌与市值/成交量显示为 `—`。
 
 链上读取走公共 RPC，不受这一项影响。
 
-**常量表核对。** `backend/app/constants/` 里的合约地址、decimals、行情源的链标识、
+**常量表核对。** `backend/app/config/constants/` 里的合约地址、decimals、行情源的链标识、
 质押金库与解绑时长都是手工维护的。写错不会报错 —— 只会静默读到空、读到不相干的合约、
 清单里所有币一起取不到价（会和"这些币本来就没有市场"混在一起），
 或者让"还有几天能提"整个算错而日期看起来照样合理。

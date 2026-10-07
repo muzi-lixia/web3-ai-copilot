@@ -126,7 +126,7 @@ export function HoldingsDonut({
           }}
         >
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            总资产
+            已知估值
           </Typography.Text>
           <Typography.Text strong style={{ fontSize: 18 }}>
             {formatValue(totalValueUsd)}

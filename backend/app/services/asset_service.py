@@ -15,17 +15,19 @@ from datetime import UTC, datetime
 from fastapi.concurrency import run_in_threadpool
 from web3 import Web3
 
-from app.constants.chains import ChainMeta, get_chain
-from app.constants.tokens import erc20_tokens, native_token, tokens_for
-from app.core.errors import UpstreamError
-from app.core.logging import get_logger
-from app.schemas.market import TokenMarket
-from app.schemas.wallet import Asset, WalletAssets
-from app.services import chain as chain_service
+from app.api.schemas.common import DataIssue
+from app.api.schemas.market import TokenMarket
+from app.api.schemas.wallet import Asset, WalletAssets
+from app.config.constants.chains import ChainMeta, get_chain
+from app.config.constants.tokens import erc20_tokens, native_token, tokens_for
+from app.infra.blockchain import chain as chain_service
+from app.infra.blockchain.chain import to_checksum
+from app.infra.logging import get_logger
+from app.infra.singleflight import singleflight
 from app.services import market_service
-from app.services.chain import to_checksum
 from app.services.units import to_human
 from app.services.valuation import value_assets
+from app.shared.errors import UpstreamError
 
 logger = get_logger(__name__)
 
@@ -38,9 +40,13 @@ def _read_holdings(chain: ChainMeta, address: str) -> list[Asset]:
 
     不含任何估值字段：这一层的输入只有链，没有任何价格信息。
     """
-    tokens = tokens_for(chain.chain_id)
-    w3 = chain_service.connect(chain)
+    return chain_service.read_with_failover(chain, lambda w3: _read_holdings_on_node(w3, chain, address))
 
+
+def _read_holdings_on_node(w3: Web3, chain: ChainMeta, address: str) -> list[Asset]:
+    tokens = tokens_for(chain.chain_id)
+
+    block = w3.eth.block_number
     assets: list[Asset] = []
 
     # 原生币：唯一不走 Multicall 的条目（它没有合约，调不出 balanceOf）
@@ -50,22 +56,25 @@ def _read_holdings(chain: ChainMeta, address: str) -> list[Asset]:
             Asset(
                 symbol=native.symbol,
                 contract=None,
-                amount=to_human(chain_service.read_native_balance(w3, address), native.decimals),
+                amount=to_human(chain_service.read_native_balance(w3, address, block), native.decimals),
                 decimals=native.decimals,
                 kind="native",
             )
         )
 
-    balances = chain_service.read_erc20_balances(w3, chain, tokens, address)
+    balances = chain_service.read_erc20_balances(w3, chain, tokens, address, block)
     for meta in erc20_tokens(tokens):
         assert meta.address is not None  # erc20_tokens 已过滤，此处仅是类型收窄
         assets.append(
             Asset(
                 symbol=meta.symbol,
                 contract=Web3.to_checksum_address(meta.address),
-                # 读取失败的条目不在 balances 里，按 0 处理：
-                # 单个 token 的读取失败不该让整张表消失。
-                amount=to_human(balances.get(meta.address.lower(), 0), meta.decimals),
+                # 失败与零余额严格区分。
+                amount=(
+                    to_human(balances[meta.address.lower()], meta.decimals)
+                    if meta.address.lower() in balances
+                    else None
+                ),
                 decimals=meta.decimals,
                 kind="erc20",
             )
@@ -89,6 +98,7 @@ async def _load_quotes(chain: ChainMeta) -> dict[str, TokenMarket]:
     return {quote.symbol: quote for quote in result.tokens}
 
 
+@singleflight
 async def get_wallet_assets(chain_id: int, owner: str) -> WalletAssets:
     """查询 owner 在 chain_id 上的资产，并尽可能附上 USD 估值。"""
     chain = get_chain(chain_id)
@@ -103,7 +113,18 @@ async def get_wallet_assets(chain_id: int, owner: str) -> WalletAssets:
 
     valuation = value_assets(holdings, quotes)
 
+    issues = [
+        DataIssue(code="balance_unavailable", asset=a.symbol, message=f"{a.symbol} 余额读取失败")
+        for a in holdings
+        if a.amount is None
+    ]
+    issues += [
+        DataIssue(code="price_unavailable", asset=s, message=f"{s} 持仓缺少报价")
+        for s in valuation.missing_price
+    ]
     return WalletAssets(
+        status="partial" if issues else "complete",
+        issues=issues,
         address=address,
         chain_id=chain.chain_id,
         chain_name=chain.name,

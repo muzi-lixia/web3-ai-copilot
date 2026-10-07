@@ -23,8 +23,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.schemas.market import TokenMarket
-from app.schemas.wallet import Asset
+from app.api.schemas.market import TokenMarket
+from app.api.schemas.wallet import Asset
+from app.services.units import monetary_calculation
 
 _HUNDRED = Decimal(100)
 _TWO_PLACES = Decimal("0.01")
@@ -41,6 +42,7 @@ class Valuation:
     stale: bool
 
 
+@monetary_calculation
 def value_assets(assets: list[Asset], quotes: dict[str, TokenMarket]) -> Valuation:
     """给资产表补上单价、估值、占比。
 
@@ -54,6 +56,9 @@ def value_assets(assets: list[Asset], quotes: dict[str, TokenMarket]) -> Valuati
     priced_holdings = 0
 
     for asset in assets:
+        if asset.amount is None:
+            entries.append((asset, None))
+            continue
         quote = quotes.get(asset.symbol)
         if quote is None:
             entries.append((asset, None))

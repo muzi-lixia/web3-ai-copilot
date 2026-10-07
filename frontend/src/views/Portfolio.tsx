@@ -2,6 +2,7 @@ import { Alert, Button, Card, Empty, Space, Switch, Table, Tag, Tooltip, Typogra
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { fetchWalletAssets } from '../api/wallet'
 import { ACCENT, DistributionBar } from '../components/DistributionBar'
 import { useAuthStore } from '../stores/auth'
@@ -50,10 +51,10 @@ export default function Portfolio() {
         ),
     },
     {
-      title: `数量（${assets.length} 个候选，${held.length} 个非零）`,
+      title: `数量（${assets.length} 个候选，${held.filter((asset) => asset.amount !== null).length} 个非零）`,
       dataIndex: 'amount',
       align: 'right' as const,
-      render: (amount: string) => {
+      render: (amount: string | null) => {
         const shown = formatAmount(amount)
         // 被裁掉的位数放进 Tooltip，需要核对时仍能看到完整值
         return shown === amount ? (
@@ -152,11 +153,12 @@ export default function Portfolio() {
         </Space>
       }
     >
+      <DataQualityNotice data={data} />
       {data && (
         <div style={{ marginBottom: 16 }}>
           <Space align="baseline" size={12}>
             <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-              总资产
+              {data.status === 'complete' ? '钱包资产' : '钱包已知估值（部分）'}
             </Typography.Text>
             {totalKnown ? (
               <Typography.Title level={3} style={{ margin: 0 }}>
@@ -197,7 +199,7 @@ export default function Portfolio() {
           showIcon
           style={{ marginBottom: 16 }}
           message={`${data.missing_price.join('、')} 没有行情，未计入总资产`}
-          description="这些币没有可查询的交易池（或不可转让），取不到价是市场事实而不是读取失败。"
+          description="报价可能缺失或数据源暂不可用，本次只展示已知估值。"
         />
       )}
 

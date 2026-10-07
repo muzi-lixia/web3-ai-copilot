@@ -16,14 +16,15 @@
 import secrets
 import time
 from datetime import UTC, datetime, timedelta
+from threading import RLock
 
 import jwt
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import to_checksum_address
 
-from app.core.config import settings
-from app.core.errors import NonceInvalidError, SignatureInvalidError, UnauthorizedError
+from app.config.settings import settings
+from app.shared.errors import NonceInvalidError, RateLimitError, SignatureInvalidError, UnauthorizedError
 
 # 签名原文模板。用英文是刻意的：钱包（尤其硬件钱包）对非 ASCII 消息的展示与编码支持不一，
 # 中文消息在部分钱包里会显示成乱码，用户根本不知道自己在签什么。
@@ -41,6 +42,34 @@ Nonce: {nonce}
 # ⚠️ V1 单进程够用。多进程 / 多实例部署时必须换 Redis：
 # 否则请求落到另一个进程就查不到 nonce，表现为"随机登录失败"。
 _nonces: dict[str, tuple[str, str, float]] = {}
+_state_lock = RLock()
+_rates: dict[str, tuple[float, int]] = {}
+
+
+def cleanup_auth_state() -> None:
+    """Called periodically by lifespan and before writes; storage remains bounded."""
+    now = time.time()
+    tick = time.monotonic()
+    with _state_lock:
+        for key, (_, _, expires) in list(_nonces.items()):
+            if expires <= now:
+                del _nonces[key]
+        for key, (expires, _) in list(_rates.items()):
+            if expires <= tick:
+                del _rates[key]
+
+
+def check_auth_rate(peer: str) -> None:
+    """Single-process, per transport peer limit. Never trust arbitrary forwarded headers."""
+    cleanup_auth_state()
+    now = time.monotonic()
+    with _state_lock:
+        expires, count = _rates.get(peer, (now + 60, 0))
+        if peer not in _rates and len(_rates) >= settings.auth_rate_max_entries:
+            raise RateLimitError("登录请求过多，请稍后重试")
+        if count >= settings.auth_rate_per_minute:
+            raise RateLimitError("登录请求过于频繁，请稍后重试")
+        _rates[peer] = (expires, count + 1)
 
 
 def _now() -> datetime:
@@ -53,7 +82,11 @@ def issue_nonce(address: str) -> tuple[str, str, datetime]:
     nonce = secrets.token_hex(16)
     expires_at = _now() + timedelta(seconds=settings.nonce_ttl_seconds)
     message = _MESSAGE_TEMPLATE.format(domain=settings.siwe_domain, address=checksum, nonce=nonce)
-    _nonces[address.lower()] = (nonce, message, expires_at.timestamp())
+    cleanup_auth_state()
+    with _state_lock:
+        if address.lower() not in _nonces and len(_nonces) >= settings.nonce_max_entries:
+            raise RateLimitError("登录请求已达容量上限，请稍后重试")
+        _nonces[address.lower()] = (nonce, message, expires_at.timestamp())
     return nonce, message, expires_at
 
 
@@ -62,12 +95,13 @@ def verify_login(address: str, signature: str) -> str:
 
     先消耗 nonce 再验签：即使验签失败，这个 nonce 也已作废，无法被反复试探。
     """
-    entry = _nonces.pop(address.lower(), None)
+    with _state_lock:
+        entry = _nonces.pop(address.lower(), None)
     if entry is None:
         raise NonceInvalidError("请先获取 nonce，或 nonce 已过期作废")
 
     _nonce, message, expires_ts = entry
-    if time.time() > expires_ts:
+    if time.time() >= expires_ts:
         raise NonceInvalidError("nonce 已过期，请重新发起登录")
 
     try:
@@ -96,7 +130,12 @@ def create_token(address: str) -> tuple[str, datetime]:
 def decode_token(token: str) -> str:
     """解析 JWT 并返回地址（小写）。失败抛 Unauthorized 类异常。"""
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            options={"require": ["sub", "iat", "exp"]},
+        )
     except jwt.ExpiredSignatureError as exc:
         raise UnauthorizedError("登录已过期，请重新连接钱包") from exc
     except jwt.InvalidTokenError as exc:

@@ -21,6 +21,7 @@ TokenMeta 就自动有行情，与功能点 1 的"链可配置、加币即一行
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,12 +30,14 @@ from typing import Any
 
 import httpx
 
-from app.constants.chains import ChainMeta, get_chain
-from app.constants.tokens import TokenMeta, price_address_of, tokens_for
-from app.core.config import settings
-from app.core.errors import UpstreamError
-from app.core.logging import get_logger
-from app.schemas.market import MarketSource, TokenMarket, TokenMarketList
+from app.api.schemas.market import MarketSource, TokenMarket, TokenMarketList
+from app.config.constants.chains import ChainMeta, get_chain
+from app.config.constants.tokens import TokenMeta, price_address_of, tokens_for
+from app.config.settings import settings
+from app.infra.logging import get_logger
+from app.infra.singleflight import singleflight
+from app.services.units import monetary_calculation
+from app.shared.errors import UpstreamError
 
 logger = get_logger(__name__)
 
@@ -81,9 +84,7 @@ async def get_quotes(chain_id: int, symbols: list[str] | None = None) -> TokenMa
     )
 
 
-def _select(
-    tokens: tuple[TokenMeta, ...], symbols: list[str] | None
-) -> tuple[list[TokenMeta], list[str]]:
+def _select(tokens: tuple[TokenMeta, ...], symbols: list[str] | None) -> tuple[list[TokenMeta], list[str]]:
     """按请求的 symbol 过滤清单，返回（命中的条目, 清单里没有的 symbol）。
 
     拼错的 symbol 要报成 missing 而不是静默丢弃：否则一个笔误换来的是一份
@@ -107,21 +108,32 @@ def _select(
     return picked, unknown
 
 
+def _usable_quotes(quotes: dict[str, TokenMarket]) -> dict[str, TokenMarket]:
+    max_age = settings.market_cache_ttl + settings.market_max_stale_seconds
+    now = datetime.now(UTC)
+    return {
+        symbol: quote
+        for symbol, quote in quotes.items()
+        if 0 <= (now - quote.updated_at).total_seconds() <= max_age
+    }
+
+
+@singleflight
 async def _load(chain: ChainMeta) -> dict[str, TokenMarket]:
     """取该链的行情表，带缓存与降级。"""
     cached = _cache.get(chain.chain_id)
     if cached is not None and cached[0] > time.monotonic():
-        return cached[1]
+        return _usable_quotes(cached[1])
 
     try:
         fresh = await _fetch(chain)
     except UpstreamError as exc:
-        if cached is None:
+        if cached is None or time.monotonic() - cached[0] > settings.market_max_stale_seconds:
             raise
         # 两个源都挂了：过期的价格也比空表有用，但必须标出来 ——
         # 不标的话用户看到的是旧价却以为是当前价，比看不到更糟。
         logger.warning("行情刷新失败，回退过期缓存：%s", exc)
-        return {s: q.model_copy(update={"stale": True}) for s, q in cached[1].items()}
+        return {s: q.model_copy(update={"stale": True}) for s, q in _usable_quotes(cached[1]).items()}
 
     _cache[chain.chain_id] = (time.monotonic() + settings.market_cache_ttl, fresh)
     return fresh
@@ -160,6 +172,14 @@ async def _fetch(chain: ChainMeta) -> dict[str, TokenMarket]:
         # 出自同一个池子、内部自洽；一行的四个字段混用两个源，会出现
         # "价格来自 A、涨跌来自 B"的错配，而界面上的数字看起来全都合理。
         quote = primary.get(key) or fallback.get(key)
+        if (
+            quote
+            and quote.updated_at
+            and not 0
+            <= (datetime.now(UTC) - quote.updated_at).total_seconds()
+            <= (settings.market_cache_ttl + settings.market_max_stale_seconds)
+        ):
+            quote = None
         if quote is None:
             continue
         for meta in metas:
@@ -195,11 +215,12 @@ def _per_source_errors_to_empty(result: object, name: str) -> dict[str, _Quote]:
     否则一个源的网络抖动会直接变成 502。）
     """
     if isinstance(result, BaseException):
-        logger.warning("%s 行情获取失败：%s", name, result)
+        logger.warning("%s 行情获取失败 (%s)", name, type(result).__name__)
         return {}
     return result  # type: ignore[return-value]
 
 
+@monetary_calculation
 async def _from_dexscreener(
     client: httpx.AsyncClient, chain: ChainMeta, addresses: tuple[str, ...]
 ) -> dict[str, _Quote]:
@@ -224,14 +245,13 @@ async def _from_dexscreener(
         if not isinstance(pair, dict):
             continue
         price_usd = _decimal(pair.get("priceUsd"))
-        if price_usd is None:
+        if price_usd is None or price_usd <= 0:
             continue
         liquidity = _decimal((pair.get("liquidity") or {}).get("usd")) or Decimal(0)
 
         base = _node_address(pair.get("baseToken"))
         if base in wanted:
             _keep_best(direct, base, liquidity, price_usd, pair)
-            continue
 
         quote = _node_address(pair.get("quoteToken"))
         if quote in wanted:
@@ -240,7 +260,7 @@ async def _from_dexscreener(
             # 「1 个 quote 值多少美元」。
             native = _decimal(pair.get("priceNative"))
             if native:
-                _keep_best(inverse, quote, liquidity, price_usd / native, pair)
+                _keep_best(inverse, quote, liquidity, price_usd / native, {})
 
     # 同一个 token 同时作为 base 和 quote 出现在不同池子里时，以 base 为准：
     # 反算多绕一次除法，能不用就不用。
@@ -266,7 +286,7 @@ async def _from_defillama(
         if not isinstance(item, dict):
             continue
         price = _decimal(item.get("price"))
-        if price is None:
+        if price is None or price <= 0:
             continue
         prefix, sep, address = str(key).partition(":")
         # 顺带校验链前缀。它理论上不会错，但校验成本近乎为零，
@@ -296,10 +316,6 @@ def _keep_best(
 def _quote_from_pair(pair: dict[str, Any], price_usd: Decimal) -> _Quote:
     change = pair.get("priceChange") or {}
     market_cap = _decimal(pair.get("marketCap"))
-    if market_cap is None:
-        # 部分池子只给 fdv（全稀释估值）。对没有锁仓/未解锁设计的币两者相等，
-        # 不等时也是"有比没有有用"。
-        market_cap = _decimal(pair.get("fdv"))
     return _Quote(
         price_usd=price_usd,
         source="dexscreener",
@@ -341,7 +357,8 @@ def _decimal(value: object) -> Decimal | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
+        return parsed if parsed.is_finite() and parsed >= 0 else None
     except (InvalidOperation, ValueError):
         return None
 
@@ -350,7 +367,8 @@ def _float_or_none(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)  # type: ignore[arg-type]
+        parsed = float(value)  # type: ignore[arg-type]
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 

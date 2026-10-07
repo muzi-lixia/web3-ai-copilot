@@ -28,12 +28,14 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from app.constants.tokens import RiskClass, risk_class_of
-from app.core.errors import UpstreamError
-from app.core.logging import get_logger
-from app.schemas.risk import RiskLevel, RiskReport
-from app.schemas.wallet import WalletAssets
+from app.api.schemas.common import DataIssue
+from app.api.schemas.risk import RiskLevel, RiskReport
+from app.api.schemas.wallet import WalletAssets
+from app.config.constants.tokens import RiskClass, risk_class_of
+from app.infra.logging import get_logger
 from app.services import asset_service, staking_service
+from app.services.units import monetary_calculation
+from app.shared.errors import UpstreamError
 
 logger = get_logger(__name__)
 
@@ -66,6 +68,7 @@ def _level(concentration: float, stablecoin: float, volatile: float) -> RiskLeve
     return "medium" if hits == 1 else "low"
 
 
+@monetary_calculation
 def build_report(
     wallet: WalletAssets,
     staked: tuple[staking_service.StakedSlice, ...] | None = None,
@@ -82,6 +85,22 @@ def build_report(
     """
     chain_id = wallet.chain_id
     now = datetime.now(UTC)
+    issues = list(wallet.issues)
+    if wallet.status != "complete" and not issues:
+        issues.append(DataIssue(code="wallet_incomplete", message="钱包数据不完整"))
+    for asset in wallet.assets:
+        if asset.amount is None or (asset.amount != 0 and asset.value_usd is None):
+            issues.append(
+                DataIssue(
+                    code="asset_incomplete", asset=asset.symbol, message=f"{asset.symbol} 余额或估值不可用"
+                )
+            )
+    if wallet.missing_price and not issues:
+        issues.append(DataIssue(code="price_unavailable", message="部分持仓缺少报价"))
+    if staked is None:
+        issues.append(DataIssue(code="staking_unavailable", message="质押仓位或估值不可用"))
+    if issues:
+        return RiskReport(status="unavailable", issues=issues, computed_at=now)
 
     # 组合 = 未质押资产 + 质押仓位。占比在这里自己算，不复用 Asset.percentage ——
     # 后者的分母是"有价资产"，不含质押，用它算出来的占比在合并口径下偏大。
@@ -97,9 +116,7 @@ def build_report(
             continue
         # 分类跟着底层资产走：sWBERA 的价格完全由 WBERA 决定，
         # 给它单开一类只会造出一个没有解释力的类别。
-        entries.append(
-            (slice_.symbol, slice_.value_usd, risk_class_of(chain_id, slice_.underlying_symbol))
-        )
+        entries.append((slice_.symbol, slice_.value_usd, risk_class_of(chain_id, slice_.underlying_symbol)))
         staked_value += slice_.value_usd
 
     total = sum((value for _, value, _ in entries), Decimal(0))
@@ -137,12 +154,20 @@ def build_report(
     #
     # 用 HHI 而不是"第一名占比"：它同时惩罚"一超"和"多强"两种形态 ——
     # 50/50 与 90/5/5 的最大占比相近，后者风险高得多，HHI 分得开（0.50 vs 0.815）。
-    volatile_shares = [share for _, share, klass in shares if klass != "stable"]
+    exposures: dict[str, Decimal] = {}
+    for asset in wallet.assets:
+        if asset.value_usd is not None and asset.value_usd > 0:
+            key = "BERA" if asset.symbol in {"BERA", "WBERA"} else asset.symbol
+            if risk_class_of(chain_id, asset.symbol) != "stable":
+                exposures[key] = exposures.get(key, Decimal(0)) + asset.value_usd
+    for item in staked or ():
+        key = "BERA" if item.underlying_symbol in {"BERA", "WBERA"} else item.underlying_symbol
+        if item.value_usd > 0 and risk_class_of(chain_id, item.underlying_symbol) != "stable":
+            exposures[key] = exposures.get(key, Decimal(0)) + item.value_usd
+    volatile_shares = [float(value / total) for value in exposures.values()]
     volatile_total = sum(volatile_shares, 0.0)
     concentration = (
-        sum((share / volatile_total) ** 2 for share in volatile_shares) * 100.0
-        if volatile_total > 0
-        else 0.0
+        sum((share / volatile_total) ** 2 for share in volatile_shares) * 100.0 if volatile_total > 0 else 0.0
     )
 
     top_symbol, top_ratio, _ = max(shares, key=lambda item: item[1])
@@ -172,9 +197,8 @@ def build_report(
 async def assess(chain_id: int, owner: str) -> RiskReport:
     """取该地址的资产与质押仓位，算出风险报告。
 
-    两件事并发做且**互不阻塞**：质押模块读不出来（RPC 抖动、合约升级）时
-    只该让质押比显示「—」，不该让整份报告失败 —— 报告主体是资产结构，
-    质押只是其中一项。
+    两件事并发读取。质押不可用时保留响应及原因，但完整组合风险返回 unknown，
+    不将剩余钱包资产误当成整个组合。
     """
     wallet, staked = await asyncio.gather(
         asset_service.get_wallet_assets(chain_id, owner),
@@ -183,9 +207,7 @@ async def assess(chain_id: int, owner: str) -> RiskReport:
     return build_report(wallet, staked)
 
 
-async def _load_staked(
-    chain_id: int, owner: str
-) -> tuple[staking_service.StakedSlice, ...] | None:
+async def _load_staked(chain_id: int, owner: str) -> tuple[staking_service.StakedSlice, ...] | None:
     """取质押仓位。失败返回 None（= 不可知），不向上抛。"""
     try:
         return await staking_service.get_staked_slices(chain_id, owner)

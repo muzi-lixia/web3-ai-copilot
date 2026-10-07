@@ -11,7 +11,9 @@ dependencies = [
     "httpx>=0.27",
     "web3>=7.6",
     "openai>=1.55",
+    "python-dotenv>=1.0",
     "pyjwt>=2.15.1",
+    "langchain-openai>=1.6.7",
 ]
 
 [dependency-groups]

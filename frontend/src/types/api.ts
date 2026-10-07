@@ -1,5 +1,5 @@
 /**
- * 与后端 `app/schemas/` 一一对应的类型定义。
+ * 与后端 `app/api/schemas/` 一一对应的类型定义。
  *
  * ⚠️ 金额字段的序列化约定：后端用 Python `Decimal` 表示金额，Pydantic 序列化为 JSON
  * **字符串**（如 `"23482"`）而不是 number —— 链上金额是 bigint，JS 的 float64 会在
@@ -11,12 +11,17 @@
 
 /* ── common ────────────────────────────────────────────── */
 
+export interface DataQuality {
+  status: 'complete' | 'partial' | 'unavailable'
+  issues: { code: string; message: string; asset: string | null }[]
+}
+
 export interface ErrorBody {
   code: string
   message: string
 }
 
-/** 后端统一错误响应体，见 backend/app/core/errors.py */
+/** 后端统一错误响应体，见 backend/app/api/exception_handlers.py */
 export interface ApiErrorBody {
   error: ErrorBody
 }
@@ -29,7 +34,7 @@ export interface Asset {
   symbol: string
   /** ERC-20 合约地址；null 表示该链原生币 */
   contract: string | null
-  amount: string
+  amount: string | null
   decimals: number
   kind: AssetKind
   /** 单价；null 表示该币在所有行情源上都取不到价 */
@@ -45,7 +50,7 @@ export interface Asset {
   percentage: number | null
 }
 
-export interface WalletAssets {
+export interface WalletAssets extends DataQuality {
   /** EIP-55 checksum 格式 */
   address: string
   chain_id: number
@@ -149,7 +154,7 @@ export interface StakingPosition {
   shares: string
   underlying_symbol: string
   /** 按当前汇率折算出的底层数量 */
-  underlying_amount: string
+  underlying_amount: string | null
   /**
    * 1 份份额值多少底层。**必须展示** —— 它是「份额涨价」这个收益形式的唯一解释。
    * sWBERA 与 WBERA 不是 1:1，不显示这个数，用户会以为自己的仓位凭空变多了。
@@ -167,7 +172,7 @@ export interface StakingPosition {
   unbonding_seconds: number
 }
 
-export interface StakingSummary {
+export interface StakingSummary extends DataQuality {
   address: string
   chain_id: number
   chain_name: string
@@ -198,17 +203,17 @@ export interface StakingSummary {
 export type RiskLevel = 'low' | 'medium' | 'high' | 'unknown'
 
 /** 除 explanation 外全部由后端代码计算，LLM 不参与 —— 数值可复现、可测试。 */
-export interface RiskReport {
+export interface RiskReport extends DataQuality {
   /** 估值占比最高的资产；无可估值持仓时为 null */
   top_asset: string | null
   /** 0-1 */
   top_asset_ratio: number | null
   /** **波动资产内部**的集中度 0-100（HHI 归一化）；剔除稳定币后重新归一 */
-  concentration_score: number
+  concentration_score: number | null
   /** 0-1 */
-  stablecoin_ratio: number
+  stablecoin_ratio: number | null
   /** 0-1，高波动资产占比 */
-  volatile_ratio: number
+  volatile_ratio: number | null
   /**
    * 0-1，质押价值占**整个组合**（质押 + 未质押资产）的比例。
    *

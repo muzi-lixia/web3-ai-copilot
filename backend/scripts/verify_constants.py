@@ -35,11 +35,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from web3 import Web3  # noqa: E402
 
-from app.constants import chains as C  # noqa: E402
-from app.constants import staking as S  # noqa: E402
-from app.constants import tokens as T  # noqa: E402
-from app.services import beep, market_service  # noqa: E402
-from app.services.chain import connect  # noqa: E402
+from app.config.constants import chains as C  # noqa: E402
+from app.config.constants import staking as S  # noqa: E402
+from app.config.constants import tokens as T  # noqa: E402
+from app.infra.blockchain.chain import connect  # noqa: E402
+from app.infra.integrations import beep
+from app.services import market_service  # noqa: E402
 
 READ_ABI = [
     {

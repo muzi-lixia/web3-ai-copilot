@@ -15,7 +15,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from app.schemas.wallet import Asset, WalletAssets
+from app.api.schemas.wallet import Asset, WalletAssets
 from app.services.risk_service import build_report
 from app.services.staking_service import StakedSlice
 
@@ -52,7 +52,7 @@ def _wallet(*holdings: tuple[str, str]) -> WalletAssets:
 
 def test_all_stablecoin_is_low_risk() -> None:
     """全稳定币：波动敞口为 0，集中度也必须是 0 而不是满分。"""
-    report = build_report(_wallet(("USDT0", "1000")))
+    report = build_report(_wallet(("USDT0", "1000")), ())
 
     assert report.stablecoin_ratio == 1.0
     assert report.volatile_ratio == 0.0
@@ -63,7 +63,7 @@ def test_all_stablecoin_is_low_risk() -> None:
 
 def test_all_volatile_is_high_risk() -> None:
     """全押波动资产：三条判据全中 → 高风险。"""
-    report = build_report(_wallet(("WBERA", "1000")))
+    report = build_report(_wallet(("WBERA", "1000")), ())
 
     assert report.stablecoin_ratio == 0.0
     assert report.volatile_ratio == 1.0
@@ -73,7 +73,7 @@ def test_all_volatile_is_high_risk() -> None:
 
 def test_balanced_wallet_is_medium_risk() -> None:
     """一半稳定币一半波动：只命中「集中度」一条 → 中风险。"""
-    report = build_report(_wallet(("USDT0", "500"), ("WBERA", "500")))
+    report = build_report(_wallet(("USDT0", "500"), ("WBERA", "500")), ())
 
     assert report.stablecoin_ratio == 0.5
     assert report.volatile_ratio == 0.5
@@ -104,7 +104,7 @@ def test_unknown_staking_is_null_not_zero() -> None:
     给 0 会让界面显示「质押占比 0%」，读起来就是「确实没质押」，
     而事实是我们根本没去看。
     """
-    report = build_report(_wallet(("WBERA", "1000")))
+    report = build_report(_wallet(("WBERA", "1000")), None)
 
     assert report.staking_ratio is None
     assert report.liquid_ratio is None
@@ -120,7 +120,7 @@ def test_measured_zero_staking_is_zero() -> None:
 
 def test_zero_value_holdings_are_ignored() -> None:
     """估值为 0 的条目不进组合，否则会给集中度塞进一堆无意义的项。"""
-    report = build_report(_wallet(("WBERA", "0"), ("USDT0", "100")))
+    report = build_report(_wallet(("WBERA", "0"), ("USDT0", "100")), ())
 
     assert report.stablecoin_ratio == 1.0
     assert report.volatile_ratio == 0.0

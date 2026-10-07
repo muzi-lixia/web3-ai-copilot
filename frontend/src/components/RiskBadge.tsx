@@ -10,7 +10,7 @@ export const LEVEL_META: Record<RiskLevel, { label: string; color: string; hint:
   low: { label: '低', color: '#52c41a', hint: '三项判据均未触发' },
   medium: { label: '中', color: '#faad14', hint: '触发 1 项判据' },
   high: { label: '高', color: '#ff4d4f', hint: '触发 2 项及以上判据' },
-  unknown: { label: '无法评估', color: '#8c8c8c', hint: '没有可估值的持仓' },
+  unknown: { label: '无法评估', color: '#8c8c8c', hint: '持仓为空或数据不完整' },
 }
 
 /**
