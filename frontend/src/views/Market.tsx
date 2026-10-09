@@ -80,7 +80,7 @@ function Dash() {
   return <Typography.Text type="secondary">—</Typography.Text>
 }
 
-/** Token 行情表。数据源：GET /market/quotes */
+/** Token 行情表。数据源：GET /markets/quotes */
 export default function Market() {
   const { data, error, isFetching, refetch } = useQuery({
     queryKey: ['market-quotes'],

@@ -1,7 +1,7 @@
 [project]
 name = "web3-ai-copilot-backend"
 version = "0.1.0"
-description = "Web3 AI Copilot 后端：链上数据 + 行情 + Agent + RAG"
+description = "Web3 AI Copilot 后端：链上数据、行情、风险、质押与 Ollama 单会话聊天"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
@@ -10,10 +10,15 @@ dependencies = [
     "pydantic-settings>=2.6",
     "httpx>=0.27",
     "web3>=7.6",
-    "openai>=1.55",
-    "python-dotenv>=1.0",
     "pyjwt>=2.15.1",
-    "langchain-openai>=1.6.7",
+    # 异步数据库访问、结构迁移与 PostgreSQL 驱动；会话和摘要都使用同一存储。
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "alembic>=1.13",
+    "asyncpg>=0.29",
+    "requests>=2.32",
+    "eth-account>=0.13",
+    "eth-utils>=5",
+    "anyio>=4",
 ]
 
 [dependency-groups]

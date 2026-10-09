@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 
-import { fetchMe } from '../api/auth'
+import { fetchMe } from '../api/auth.ts'
 
 /**
  * 启动期校验本地凭证是否仍然有效。
@@ -19,7 +19,8 @@ import { fetchMe } from '../api/auth'
  */
 export function useSessionProbe(token: string | null) {
   return useQuery({
-    queryKey: ['auth', 'me'],
+    // 同一用户更换凭据也须重新验证，不能命中上次登录的五分钟缓存。
+    queryKey: ['auth', 'me', token],
     queryFn: fetchMe,
     enabled: Boolean(token),
     // 凭证无效时重试只是把同一个 401 打三遍，没有意义。

@@ -1,17 +1,6 @@
 import type { RiskLevel } from '../types/api'
 
-/**
- * 风险档的展示元信息。
- *
- * 这里的红/橙/绿是**通用危险度语义**，与项目里金融数字的「涨红跌绿」约定无关 ——
- * 后者用于价格涨跌，两者不该互相套用。
- */
-export const LEVEL_META: Record<RiskLevel, { label: string; color: string; hint: string }> = {
-  low: { label: '低', color: '#52c41a', hint: '三项判据均未触发' },
-  medium: { label: '中', color: '#faad14', hint: '触发 1 项判据' },
-  high: { label: '高', color: '#ff4d4f', hint: '触发 2 项及以上判据' },
-  unknown: { label: '无法评估', color: '#8c8c8c', hint: '持仓为空或数据不完整' },
-}
+import { LEVEL_META } from '../config/presentation'
 
 /**
  * 风险等级色块。

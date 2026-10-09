@@ -1,5 +1,5 @@
-import { http } from './client'
-import type { TokenMarketList } from '../types/api'
+import { http } from './client.ts'
+import type { ApiResponse, TokenMarketList } from '../types/api'
 
 /**
  * 查询 Token 行情。
@@ -12,11 +12,11 @@ import type { TokenMarketList } from '../types/api'
 export async function fetchMarketQuotes(
   options: { chainId?: number; symbols?: string[] } = {},
 ): Promise<TokenMarketList> {
-  const { data } = await http.get<TokenMarketList>('/market/quotes', {
+  const { data } = await http.get<ApiResponse<TokenMarketList>>('/markets/quotes', {
     params: {
       chain_id: options.chainId,
       symbols: options.symbols?.length ? options.symbols.join(',') : undefined,
     },
   })
-  return data
+  return data.data
 }

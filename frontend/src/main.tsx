@@ -11,7 +11,7 @@ import './index.css'
 
 /**
  * 服务端数据的统一缓存中枢。
- * 约定：所有来自后端的查询走 TanStack Query，客户端状态（地址、对话、轨迹）走 zustand。
+ * 看板查询由 TanStack Query 缓存；登录态用 zustand，对话页面维护订阅和临时展示状态。
  */
 const queryClient = new QueryClient({
   defaultOptions: {

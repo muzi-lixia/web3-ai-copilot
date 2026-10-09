@@ -1,19 +1,22 @@
-# Web3 AI Copilot 后端依赖
-# 只列直接依赖并锁定当前实际安装的版本；传递依赖（aiohttp、eth-abi、starlette 等）由 pip 自动解析。
+# 直接依赖版本与 uv.lock 一致；推荐 uv sync。
 
-# --- 运行时 ---
+# 运行时
 fastapi==0.142.2
 uvicorn[standard]==0.54.0
 pydantic==2.13.5
 pydantic-settings==2.15.0
 httpx==0.28.1
 web3==8.0.0
-openai==3.24.0
-langchain-openai==1.6.7
-python-dotenv==1.2.4
 pyjwt==2.15.1
+sqlalchemy[asyncio]==2.0.54
+alembic==1.20.0
+asyncpg==0.32.0
+requests==2.34.2
+eth-account==0.14.0
+eth-utils==6.0.0
+anyio==4.15.1
 
-# --- 开发工具（测试 / lint，部署时可不要）---
+# 开发工具
 ruff==0.16.10
 pytest==9.1.1
 pytest-asyncio==1.4.0

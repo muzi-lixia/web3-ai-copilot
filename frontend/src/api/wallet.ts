@@ -1,5 +1,5 @@
-import { http } from './client'
-import type { WalletAssets } from '../types/api'
+import { http } from './client.ts'
+import type { ApiResponse, WalletAssets } from '../types/api'
 
 /**
  * 查询钱包资产。
@@ -10,6 +10,6 @@ import type { WalletAssets } from '../types/api'
  * 需要做链切换时，把 chain_id 传进来即可，接口已经支持。
  */
 export async function fetchWalletAssets(address: string): Promise<WalletAssets> {
-  const { data } = await http.get<WalletAssets>(`/wallet/${address}/assets`)
-  return data
+  const { data } = await http.get<ApiResponse<WalletAssets>>(`/wallets/${address}/assets`)
+  return data.data
 }

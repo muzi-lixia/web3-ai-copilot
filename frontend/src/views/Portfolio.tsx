@@ -4,12 +4,13 @@ import { useState } from 'react'
 
 import { DataQualityNotice } from '../components/DataQualityNotice'
 import { fetchWalletAssets } from '../api/wallet'
-import { ACCENT, DistributionBar } from '../components/DistributionBar'
+import { DistributionBar } from '../components/DistributionBar'
+import { ACCENT } from '../config/presentation'
 import { useAuthStore } from '../stores/auth'
 import type { Asset } from '../types/api'
 import { formatAmount, formatPrice, formatValue, shorten } from '../utils/format'
 
-/** 资产明细表。数据源：GET /wallet/{address}/assets */
+/** 资产明细表。数据源：GET /wallets/{address}/assets */
 export default function Portfolio() {
   const address = useAuthStore((state) => state.address)
   const [showZero, setShowZero] = useState(false)

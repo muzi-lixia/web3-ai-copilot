@@ -1,104 +1,76 @@
 # Web3 AI Copilot
 
-基于 AI Agent 的链上资产分析与知识助手。用自然语言完成钱包资产查询、Token 行情、质押仓位分析、
-资产风险分析，以及 Web3 协议知识问答。
+当前提供钱包登录、Berachain 资产与行情查询、组合风险分析、质押仓位展示，以及本地 Ollama 单会话聊天。
+聊天支持 SSE、历史持久化和摘要；每个用户的历史独立隔离，尚未接入实时资产工具或知识库。
 
-## 目录
+## 后端目录与职责
 
-    backend/      FastAPI + 链上数据 + Agent + RAG
-      app/
-        api/
-          routes/     HTTP 路由（auth / wallet / market / risk / staking）
-          schemas/    接口数据契约（含预留 Agent / SSE 契约）
-          deps.py     认证依赖
-          exception_handlers.py  HTTP 异常映射
-        services/     业务用例、估值与风险计算
-        agents/       Agent 工作流（预留）
-        tools/        业务工具适配（预留）
-        llm/          模型客户端（client.py）
-        rag/          索引与检索（预留）
-        memory/       对话上下文管理（预留）
-        repositories/ 持久化访问（预留）
-        models/       数据库实体（预留）
-        infra/
-          blockchain/ RPC、Multicall、质押合约读取
-          integrations/ Beep 数据源适配
-          logging.py  基础日志
-        guardrails/   模型与工具内容检查（预留）
-        observability/ 执行追踪与指标（预留）
-        workers/      后台任务入口（预留）
-        config/
-          settings.py 环境配置
-          constants/  链、Token、质押模块注册表
-        shared/       不依赖 HTTP 的业务异常
-      scripts/        模型连通与常量核对脚本
-      tests/          业务计算、模型配置与 HTTP 集成测试
-    frontend/     React 19 + Vite + antd
-      src/
-        api/          与后端路由一一对应，client.ts 统一请求与错误
-        types/        与后端 schemas 对齐
-        stores/       zustand：当前地址、对话、Agent 轨迹
-        hooks/        useAgentStream（SSE 分帧）
-        views/        Dashboard / Portfolio / Market / Risk / Staking / Copilot / Knowledge
-        components/   AppLayout / DistributionBar / RiskBadge / …
-        utils/        format.ts —— 展示层格式化（纯字符串，不经过 number）
-    contracts/    独立 Solidity 工程（尚未开始；与 backend 分离，仅通过 ABI 对接）
-    docs/         RAG 语料
-    evaluation/   Agent & RAG 评测（V3）
+后端按业务领域组织，完整结构与扩展规则见 [后端工程说明](backend/README.md)。
 
-## 后端分层约定
+```text
+backend/app/
+  main.py           应用工厂与生命周期
+  api/              HTTP/SSE、依赖注入、版本化路由
+  core/             配置、异常、日志、服务装配
+  modules/          auth、asset、market、risk、staking
+  ai/               conversation、memory、llm
+  infrastructure/   database、blockchain、providers
+  common/           跨模块基础类型与纯工具
+```
 
-- HTTP 入口在 `api/routes`；现有 URL、请求字段和响应字段保持不变。
-- `services` 承载业务用例与确定性计算，复用 `api/schemas` 中的数据契约。
-  Schema 仅定义数据，不依赖路由或请求对象；数据库实体单独放在 `models`。
-- RPC 与合约读取在 `infra/blockchain`，Beep 在 `infra/integrations`。
-  行情服务目前仍包含报价来源适配及缓存，后续可随业务迭代拆分。
-- 业务异常在 `shared/errors.py`，HTTP 错误响应统一由 `api/exception_handlers.py` 转换。
-- 页面路由与未来 Agent 工具复用同一套业务服务；工具不经内部 HTTP 再调用本服务。
-- 后续聊天服务负责会话与运行生命周期，Agent 负责模型与工具编排；
-  `memory` 负责上下文裁剪与摘要，消息持久化由 Repository 负责。
-- `config/constants` 保留分文件注册表，避免将链、Token 与质押配置合并成一个大文件。
-- 标记为“预留”的包当前只有职责说明，尚无数据库、队列、Agent 或 RAG 实现。
-  本次目录迁移不代表这些业务能力已经完成。
+业务模块不依赖 AI 和 HTTP；未来 Tool Adapter 复用同一业务服务。当前只有普通聊天、摘要和持久化，不预建未实现的 Agent、RAG 或 Worker 空包。
 
 ## 本地启动
 
-后端跑在 `:8000`：
+项目依赖 PostgreSQL 和 Ollama。首次准备：
 
-    cd backend
-    cp .env.example .env
-    uv sync
-    uv run uvicorn app.main:app --reload
+```sh
+docker compose up -d postgres
+ollama pull qwen2.5:7b
+cd backend
+cp .env.example .env
+uv sync
+uv run python scripts/init_chat_db.py
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --workers 1
+```
 
-不用 uv 的话走 `requirements.txt`（10 个直接依赖，版本锁死；传递依赖交给 pip 解析）：
+另一个终端启动前端：
 
-    pip install -r requirements.txt
-    uvicorn app.main:app --reload
+```sh
+cd frontend
+cp .env.example .env
+# 填写 VITE_REOWN_PROJECT_ID
+npm ci
+npm run dev
+```
 
-前端跑在 `:5173`，`/api` 由 vite proxy 转发到 `:8000`：
+后端为 `http://127.0.0.1:8000`，接口文档为 `/docs`；前端为 `http://localhost:5173`。
+Vite 将 `/api` 转发到后端。生产参数校验见 `.env.example`。
+不使用 uv 时，可用 `pip install -r backend/requirements.txt` 安装已锁定的直接依赖。
 
-    cd frontend
-    cp .env.example .env    # 填 VITE_REOWN_PROJECT_ID，否则钱包弹窗打不开
-    npm install
-    npm run dev
+## 验证与阅读
 
-验证：
+```sh
+cd backend
+uv run pytest -q
+uv run ruff check app tests scripts
+# 真 PostgreSQL 集成测试必须指向初始化好的专用测试库
+RUN_CHAT_DB_TESTS=1 uv run pytest -q
+# 真实 HTTP / PostgreSQL / Ollama，需使用没有其他实例占用的专用数据库
+uv run python scripts/check_chat.py
+# 修改链上常量后核对 RPC、Token、金库与数据源
+uv run python scripts/verify_constants.py
+```
 
-- 后端：`curl http://127.0.0.1:8000/health` → `{"status":"ok","chain_id":80094}`
-- 接口文档：http://127.0.0.1:8000/docs
-- 前端：http://localhost:5173 → 登录后落在总览页；侧边栏可切到资产 / 行情 / 风险 / 质押
-  （这四页的数据已接通），Copilot / Knowledge 仍是占位
-- 模型出口：`cd backend && .venv/bin/python scripts/check_model.py` —— 实打一次，
-  确认真的连得上、模型名没拼错、真能出字。**对话功能写之前先过这一关**：
-  模型配置的错误大多是静默的，等到提问时才暴露会先被怀疑成业务代码写错了
-- 常量表：`cd backend && .venv/bin/python scripts/verify_constants.py`
+前端在 `frontend` 中运行 `npm test`、`npm run lint`、`npm run build`。
+先看 [文档索引](docs/README.md)，再沿 [代码阅读指南](docs/code-reading-guide.md) 追一条请求。
 
 ## 支持的链
 
 目前只接入 **Berachain**（chain_id `80094`，原生币 BERA）。
 
-链参数集中在 `backend/app/config/constants/chains.py`（chain_id / 原生币 / Multicall3 / 公共 RPC /
-浏览器 / 两个行情源的链标识），各链读哪些 token 在 `backend/app/config/constants/tokens.py`。
+链参数集中在 `backend/app/infrastructure/blockchain/chains.py`（chain_id / 原生币 / Multicall3 / 公共 RPC /
+浏览器 / 两个行情源的链标识），各链读哪些 token 在 `backend/app/modules/asset/tokens.py`。
 **新增一条链 = 各加一条条目**，读取层、服务层、路由都不用改。当前链由 `DEFAULT_CHAIN_ID`
 决定，接口也支持按请求传 `chain_id`。
 
@@ -112,9 +84,9 @@
 
     前端                                后端
     连接钱包（Reown AppKit 弹窗）
-    POST /auth/nonce              →     生成随机数，连同签名原文一起下发
+    POST /auth/challenges              →     生成随机数，连同签名原文一起下发
     钱包对原文签名
-    POST /auth/verify             →     从签名反推地址，验过后签发 JWT
+    POST /auth/tokens             →     从签名反推地址，验过后签发 JWT
     后续请求带 Authorization: Bearer <token>
 
 连接与签名分成两次点击：未连接时按钮是「连接钱包」（只弹钱包），连上后变成「签名并登录」。
@@ -136,11 +108,13 @@
     cd frontend && cp .env.example .env
     # 填 VITE_REOWN_PROJECT_ID，免费创建：https://cloud.reown.com
 
+普通 JSON 的以下业务字段均位于 `data`，完整响应和错误说明见 [接口契约](docs/api-contract.md)。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/v1/auth/nonce` | `{address}` → `{nonce, message, expires_at}` |
-| POST | `/api/v1/auth/verify` | `{address, signature}` → `{token, address, expires_at}` |
-| GET | `/api/v1/auth/me` | 需 Bearer token → `{address}` |
+| POST | `/api/v1/auth/challenges` | `{address}` → `{nonce, message, expires_at}` |
+| POST | `/api/v1/auth/tokens` | `{address, signature}` → `{token, address, expires_at}` |
+| GET | `/api/v1/users/me` | 需 Bearer token → `{address}` |
 
 `JWT_SECRET` 本地可不设置（使用开发默认值）。生产设置 `ENVIRONMENT=production`、
 `DEBUG=false`、至少 32 字节的独立随机密钥和实际 `SIWE_DOMAIN`；不满足时拒绝启动。
@@ -158,7 +132,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/wallet/{address}/assets` | 需 Bearer token，且 `address` 必须是登录地址 → 资产数组 + 总额 + 占比 |
+| GET | `/api/v1/wallets/{address}/assets` | 需 Bearer token，且 `address` 必须是登录地址 → 资产数组 + 总额 + 占比 |
 
 三条设计约定：
 
@@ -175,7 +149,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/market/quotes` | 需 Bearer token。可选 `chain_id` 与 `symbols`（逗号分隔）→ 行情数组 + `missing` |
+| GET | `/api/v1/markets/quotes` | 需 Bearer token。可选 `chain_id` 与 `symbols`（逗号分隔）→ 行情数组 + `missing` |
 
 两个免费源互补，都不需要注册：
 
@@ -204,10 +178,10 @@ FDV 不再替代流通市值。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/risk/{address}/report` | 需 Bearer token，且 `address` 必须是登录地址 → 风险报告 |
+| GET | `/api/v1/wallets/{address}/risk-report` | 需 Bearer token，且 `address` 必须是登录地址 → 风险报告 |
 
 **数值全部由代码计算，LLM 不参与。** 模型生成的数字不可复现、不可测试，也解释不了它是怎么来的。
-自然语言解读（`explanation`）留给 LLM 模块，现在恒为 null。
+风险接口只返回确定性指标，未实现的模型解释字段已移除。
 
 四个指标：
 
@@ -247,7 +221,7 @@ FDV 不再替代流通市值。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/staking/{address}/positions` | 需 Bearer token，且 `address` 必须是登录地址 → 仓位 + 年化 + 累计收益 + 提款队列 |
+| GET | `/api/v1/wallets/{address}/staking-positions` | 需 Bearer token，且 `address` 必须是登录地址 → 仓位 + 年化 + 累计收益 + 提款队列 |
 
 接入的是 **Berachain PoL v2 的 BERA 质押金库**（存 BERA / WBERA 得 sWBERA）。
 它不是「委托给验证者」那套（那是 PoL v1）：收益来自 PoL 激励里 33% 的协议费用
@@ -291,48 +265,32 @@ FDV 不再替代流通市值。
 
 质押凭证 sWBERA **故意不进 token 清单**：它若进了，资产页和质押页会各展示一次同一个仓位，
 `total_value_usd` 也会重复计入，风险报告里的「质押占比」会算出大于 100%。
-质押模块登记在 `backend/app/config/constants/staking.py`，**加模块 = 加一条 `StakingModule`**。
+质押模块登记在 `backend/app/modules/staking/constants.py`，**加模块 = 加一条 `StakingModule`**。
 
-## 模型出口（可切换）
+## Ollama 模型配置
 
-对话能力还没接（见「进度」），模型出口已经封好了 —— `backend/app/llm/client.py`。
-**换平台只改一个环境变量**，加一个平台就是在 `PLATFORMS` 里加一行。
+项目只使用 `backend/app/ai/llm/ollama.py`，对话与摘要共用原生 `/api/chat`。
+配置统一由 Settings 读取：
 
-| `MODEL_PROVIDER` | 默认模型 | 需要 key | key 的环境变量 |
-|---|---|---|---|
-| `ollama`（默认） | `qwen2.5:7b` | 否 | —（本地，不出网） |
-| `deepseek` | `deepseek-chat` | 是 | `DEEPSEEK_API_KEY` |
-| `qwen` | `qwen-plus` | 是 | `DASHSCOPE_API_KEY` |
-| `openai` | `gpt-4o-mini` | 是 | `OPENAI_API_KEY` |
+| 参数 | 用途 |
+|---|---|
+| `COPILOT_OLLAMA_URL` | 本地 Ollama 地址 |
+| `COPILOT_MODEL` | 默认 `qwen2.5:7b` |
+| `COPILOT_TIMEOUT_SECONDS` | 推理与排队超时 |
+| `COPILOT_CONTEXT_WINDOW` | 上下文窗口 |
+| `COPILOT_OUTPUT_TOKENS` | 回答输出上限 |
+| `COPILOT_SUMMARY_OUTPUT_TOKENS` | 摘要输出上限 |
+| `COPILOT_CONTEXT_RESERVE` | 模板等安全余量 |
 
-    from app.llm.client import get_client
-
-    llm = get_client()                                     # 按 MODEL_PROVIDER 选
-    resp = await llm.ainvoke([{"role": "user", "content": "你好"}])
-
-用 LangChain 的 `ChatOpenAI`。四家都提供 OpenAI 兼容的 `/chat/completions`，所以切平台就是换
-`base_url` 与 key。模型名、`temperature`、`max_tokens` 都绑在 client 上，取一次到处用；
-其余参数走 `**kwargs` 透传 —— `get_client(temperature=0.2, max_tokens=1024)`。
-
-有一个坑要记：**LangChain 里字段名拼错不报错** —— 只给一条 warning 就把参数塞进 `model_kwargs`，
-参数等于没生效。超时字段叫 `request_timeout` 而**不是** `timeout`。有单测钉住「传进去 = 读得到」。
-
-配完先实打一次 —— 配置错误的症状大多是静默的（key 填错只在真正提问时才 401，
-模型名拼错只会得到空回复）：
-
-    cd backend && .venv/bin/python scripts/check_model.py
-
-它做两件事：`models.list()` 证明连通、核对模型名在不在列表里；再发一句最小请求证明真能出字。
-**已实测（2026-10-07，本机 Ollama）**：`ollama list` 只有 `bge-m3`（向量模型，不能对话）
-与 `deepseek-r1:7b`，后者连通、能对话。要用本地模型先 `ollama pull qwen2.5:7b`。
-另外留一条给 ⑤ 的记录：**`deepseek-r1` 这类推理模型收到 `tools` 会当没看见** ——
-不报错、直接用自己印象回答，接工具链路时不能拿它当脑子。
+提示词集中在 `backend/app/ai/memory/prompts.py`。输入先检查预算，模型流缺少 done 时明确失败；
+模型 HTTP 请求不走本机环境代理。四平台备用工厂、对应 key 和 MODEL_PROVIDER 配置已移除。
+真实聊天与摘要连通性通过 `scripts/check_chat.py` 验证。
 
 ## 总览页
 
 登录后的落地页（`/` 重定向到 `/dashboard`），把资产、风险、质押三块的**结论**聚在一屏，
-明细去各自页面。它不新增接口，只复用 `/wallet/{address}/assets`、`/risk/{address}/report`
-与 `/staking/{address}/positions`。
+明细去各自页面。它不新增接口，只复用 `/wallets/{address}/assets`、`/wallets/{address}/risk-report`
+与 `/wallets/{address}/staking-positions`。
 
 三个请求分开取、分开报错。余额来自自家 RPC，风险报告还要在余额之上再取一次行情，
 质押又依赖另一套链上读取 + 第三方数据层 —— 三者失败原因和可恢复性都不同，
@@ -369,7 +327,7 @@ nonce 有 TTL、容量上限和每分钟清理，消费受线程锁保护。nonc
 多个 worker / 多实例需要共享 nonce 存储，不能直接增加 worker 数。
 
 离线回归：`cd backend && .venv/bin/python -m pytest -q`。
-模型配置单测隔离本机代理与模型环境变量；真实连通性仍由 `scripts/check_model.py` 检查。
+模型协议测试使用 HTTP 模拟传输；真实连通性由 `scripts/check_chat.py` 检查。
 
 ## 环境说明
 
@@ -398,3 +356,44 @@ nonce 有 TTL、容量上限和每分钟清理，消费受线程锁保护。nonc
 这两处登记在 `TokenMeta.onchain_symbol`，是**把差异写下来**而不是把判据放松：`symbol` 是
 展示与做键用的名字，`onchain_symbol` 是合约自称的名字，两者本来就允许不同。没登记的差异照旧报错 ——
 否则「地址填成了另一个合约」这个错误就再也测不出来了，而它的症状恰好就是名称对不上。
+
+## Copilot 持久化与摘要
+
+启动与模型准备见前文“本地启动”。数据库默认监听本机 54329，持久化使用独立数据卷。
+
+- 每个用户一个固定会话；会话、轮次、消息与版本化摘要持久化到 PostgreSQL，前端不保存会话选择、不提交历史。
+  旧版 sessionStorage 对话不会被删除，但不会自动导入服务器。
+- 打开即恢复本人历史，支持历史分页、SSE 流式回复、停止和最后一轮失败重试；无会话列表、新建、切换或改名入口。
+- 用户身份只取 JWT，事务级身份 + PostgreSQL RLS 隔离；关联表通过复合外键保证归属一致。
+- 正文约每 1 秒保存一次快照，结束与取消时立即保存。SSE 实时传全量正文快照，前端按消息 ID/版本替换，
+  断线自动重连。切页/刷新不会停止生成；停止按钮使用独立取消接口。
+- 服务重启将遗留运行标为 interrupted，保留已提交的正文快照；未提交的正文可能丢失；数据库写入失败时不能承诺只丢失一个周期。
+- 同一会话最多一轮生成，网络重发用同一幂等 ID；失败重试关联原问题，不重复写用户消息。
+- 上下文由后端组装：系统提示 + 带出处的结构化摘要 + 摘要未覆盖的完整轮次 + 当前问题。
+- 默认保留最近 6 轮原文，约 7,000 输入 token 估算时触发摘要，输入目标不超过 10,000。
+  每 5 次增量摘要周期从原文分批重建；摘要失败保留旧版本，不推进覆盖范围，按完整轮次裁剪兜底。
+- 原始消息不会因摘要被删除。失败/取消的半段回答可查看，但不进入后续模型上下文。
+- 记忆只属于本人固定会话，不跨用户共享；尚未接入链上查询工具或知识库。
+- 显式流错误会查询轮次状态，并提供“恢复对话”；旧实例检测到数据库运行锁失效后停止调度，需重启服务。
+- 旧多会话数据保留，固定使用最近创建的非空会话，其他旧历史不合并、不删除；详见 [单会话说明](docs/single-session-chat.md)。
+
+应用使用 `DATABASE_URL`（app_rw）；迁移使用 `DATABASE_MIGRATION_URL`（app_ddl），
+开发默认口令见 `.env.example`。生产必须替换全部默认口令，数据库不得公网暴露。
+初始化脚本支持 `CHAT_DB_ADMIN_URL`、`CHAT_DDL_PASSWORD`、`CHAT_RW_PASSWORD`；
+这些管理员/迁移凭据只用于初始化命令，不需要给应用授予管理员权限。
+
+数据库通过 advisory lock 强制一个实例、一个 worker；启动的受限恢复函数只允许将遗留运行标记中断。
+数据库停机时应用无法提供对话；已有会话保存在数据卷中。`docker compose down` 不删除数据卷，
+不要使用 `down -v`，除非明确要清空数据。
+
+模型配置：`COPILOT_OLLAMA_URL`（默认 http://127.0.0.1:11434）、`COPILOT_MODEL`（qwen2.5:7b）、
+`COPILOT_TIMEOUT_SECONDS`（180）。其他摘要预算与快照参数见 `.env.example`。
+本地模型请求不走环境代理。
+
+SSE 反向代理应关闭响应缓冲（Nginx `proxy_buffering off`）与压缩，读超时大于 15 秒心跳间隔。
+
+验证命令见前文“验证与阅读”；真实模型脚本必须使用没有其他实例占用的专用数据库。
+
+### 后端 HTTP 契约变更
+
+当前后端不保留旧接口，资源 URL、会话 PUT、轮次重试/取消和普通响应表示已更新，详见 [接口契约](docs/api-contract.md)。前端已同步适配新路径和 code/msg/data；SSE 事件载荷保持独立协议。

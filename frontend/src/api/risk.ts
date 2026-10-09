@@ -1,5 +1,5 @@
-import { http } from './client'
-import type { RiskReport } from '../types/api'
+import { http } from './client.ts'
+import type { ApiResponse, RiskReport } from '../types/api'
 
 /**
  * 查询资产风险报告。
@@ -8,6 +8,6 @@ import type { RiskReport } from '../types/api'
  * 前端不内置链清单，换链只改后端配置。
  */
 export async function fetchRiskReport(address: string): Promise<RiskReport> {
-  const { data } = await http.get<RiskReport>(`/risk/${address}/report`)
-  return data
+  const { data } = await http.get<ApiResponse<RiskReport>>(`/wallets/${address}/risk-report`)
+  return data.data
 }

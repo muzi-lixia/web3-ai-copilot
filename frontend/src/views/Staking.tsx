@@ -175,7 +175,7 @@ const withdrawalColumns: TableProps<PendingWithdrawal>['columns'] = [
 ]
 
 /**
- * 质押仓位。数据源：GET /staking/{address}/positions
+ * 质押仓位。数据源：GET /wallets/{address}/staking-positions
  *
  * 这一页只**展示**。质押与赎回都要用户签名交易，那是钱包的事 ——
  * 后台不持钥，也不该摆一个不签名的"操作"按钮出来。

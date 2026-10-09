@@ -35,12 +35,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from web3 import Web3  # noqa: E402
 
-from app.config.constants import chains as C  # noqa: E402
-from app.config.constants import staking as S  # noqa: E402
-from app.config.constants import tokens as T  # noqa: E402
-from app.infra.blockchain.chain import connect  # noqa: E402
-from app.infra.integrations import beep
-from app.services import market_service  # noqa: E402
+from app.infrastructure.blockchain import chains as C  # noqa: E402
+from app.infrastructure.blockchain.client import connect  # noqa: E402
+from app.infrastructure.providers import beep
+from app.modules.asset import tokens as T  # noqa: E402
+from app.modules.market import service as market_service  # noqa: E402
+from app.modules.staking import constants as S  # noqa: E402
 
 READ_ABI = [
     {
@@ -79,6 +79,7 @@ STAKING_ABI = [
 
 
 def short(address: str) -> str:
+    """缩写地址仅用于终端展示；不会把缩写后的字符串用于链上请求。"""
     return f"{address[:10]}…{address[-6:]}"
 
 
@@ -263,9 +264,7 @@ def check_staking(chain: C.ChainMeta) -> list[str]:
         try:
             underlying = Web3.to_checksum_address(vault.functions.asset().call())
         except Exception as exc:  # noqa: BLE001
-            problems.append(
-                f"[{chain.key}] 质押 {module.key}: asset() 读取失败 —— {type(exc).__name__}"
-            )
+            problems.append(f"[{chain.key}] 质押 {module.key}: asset() 读取失败 —— {type(exc).__name__}")
             print(f"  [!!] {module.key:<12} asset() 读取失败：{type(exc).__name__}")
         else:
             token = by_address.get(underlying.lower())
@@ -280,10 +279,7 @@ def check_staking(chain: C.ChainMeta) -> list[str]:
                     f"[{chain.key}] 质押 {module.key}: 注册表声明底层 {module.underlying_symbol}，"
                     f"链上是 {token.symbol}"
                 )
-                print(
-                    f"  [!!] {module.key:<12} 声明 {module.underlying_symbol}"
-                    f"  ≠  链上 {token.symbol}"
-                )
+                print(f"  [!!] {module.key:<12} 声明 {module.underlying_symbol}  ≠  链上 {token.symbol}")
             else:
                 print(f"  [ok] {module.key:<12} 底层 {token.symbol}（{short(underlying)}）")
 
@@ -304,15 +300,9 @@ def check_staking(chain: C.ChainMeta) -> list[str]:
                     f"[{chain.key}] 质押 {module.key}: 表内解绑 {module.unbonding_seconds}s "
                     f"≠ 链上 {cooldown}s"
                 )
-                print(
-                    f"  [!!] {module.key:<12} 表内 {module.unbonding_seconds}s "
-                    f"≠ 链上 {cooldown}s"
-                )
+                print(f"  [!!] {module.key:<12} 表内 {module.unbonding_seconds}s ≠ 链上 {cooldown}s")
             else:
-                print(
-                    f"  [ok] {module.key:<12} 解绑期 {cooldown}s"
-                    f"（{cooldown / 86400:.0f} 天）"
-                )
+                print(f"  [ok] {module.key:<12} 解绑期 {cooldown}s（{cooldown / 86400:.0f} 天）")
 
     # Beep 是年化与收益的唯一来源。取不到不影响上面的核对，但必须显式说出来 ——
     # 否则"年化一直是 null"会被读成"这个金库不提供年化"。
@@ -329,6 +319,10 @@ def check_staking(chain: C.ChainMeta) -> list[str]:
 
 
 def main() -> int:
+    """先核对本地地址格式，再逐链验证代币、行情和质押配置。
+
+    汇总所有异常后以退出码 1 表示失败，便于维护人员或自动化脚本发现常量漂移。
+    """
     local = check_local()
     print("── 本地检查（地址格式 / checksum）────────────────────")
     if local:

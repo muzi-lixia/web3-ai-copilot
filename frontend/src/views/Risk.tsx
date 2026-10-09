@@ -4,7 +4,8 @@ import type { ReactNode } from 'react'
 
 import { DataQualityNotice } from '../components/DataQualityNotice'
 import { fetchRiskReport } from '../api/risk'
-import { LEVEL_META, RiskBadge } from '../components/RiskBadge'
+import { RiskBadge } from '../components/RiskBadge'
+import { LEVEL_META } from '../config/presentation'
 import { useAuthStore } from '../stores/auth'
 import { formatRatio } from '../utils/format'
 
@@ -51,7 +52,7 @@ function Group({ title, note, children }: { title: string; note: string; childre
 }
 
 /**
- * 资产风险分析。数据源：GET /risk/{address}/report
+ * 资产风险分析。数据源：GET /wallets/{address}/risk-report
  *
  * 四个比例分成**两套切分**，各自完整、回答的问题不同：
  *
@@ -185,7 +186,7 @@ export default function Risk() {
               </Space>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 命中 0 / 1 / 2+ 条分别对应低 / 中 / 高。数值全部由代码计算，可复现、可逐条复核；
-                LLM 只负责把它写成自然语言（待接入）。 计算于{' '}
+                计算于{' '}
                 {new Date(data.computed_at).toLocaleTimeString()}。
               </Typography.Text>
             </Space>

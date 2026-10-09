@@ -15,7 +15,6 @@ const NAV = [
   { key: '/risk', label: <Link to="/risk">Risk</Link> },
   { key: '/staking', label: <Link to="/staking">Staking</Link> },
   { key: '/copilot', label: <Link to="/copilot">Copilot</Link> },
-  { key: '/knowledge', label: <Link to="/knowledge">Knowledge</Link> },
 ]
 
 export default function AppLayout() {

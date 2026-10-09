@@ -2,7 +2,7 @@ import { Empty, Typography } from 'antd'
 
 import type { Asset } from '../types/api'
 import { formatValue } from '../utils/format'
-import { PALETTE } from './DistributionBar'
+import { PALETTE } from '../config/presentation'
 
 /** 环的直径与环宽。宽度定了内圈就有 116px，够放"总资产 + 金额"两行。 */
 const SIZE = 168
@@ -29,7 +29,7 @@ interface Slice {
  *
  * 用 SVG 的 stroke-dasharray 画弧，没有引入图表库 —— 这里要做的事只有
  * "一眼看出构成"，为它拉进一个通用图表引擎，体积、主题、响应式都得重新对齐，
- * 收益却只是同一个圆。色序取自 DistributionBar 的 PALETTE，两处的同色即同币。
+ * 收益却只是同一个圆。色序取自共享的 PALETTE，两处的同色即同币。
  *
  * 占比之和不足 100%（持仓多于 topCount）时补一段「其他」——
  * 否则环上会缺一块，看起来像少画了。金额无法合并显示：那是后端 Decimal

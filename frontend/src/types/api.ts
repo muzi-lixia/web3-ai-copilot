@@ -1,5 +1,5 @@
 /**
- * 与后端 `app/api/schemas/` 一一对应的类型定义。
+ * 与后端modules 下各领域的 schemas.py 和 ai/conversation/schemas.py 对应的类型定义。
  *
  * ⚠️ 金额字段的序列化约定：后端用 Python `Decimal` 表示金额，Pydantic 序列化为 JSON
  * **字符串**（如 `"23482"`）而不是 number —— 链上金额是 bigint，JS 的 float64 会在
@@ -16,15 +16,21 @@ export interface DataQuality {
   issues: { code: string; message: string; asset: string | null }[]
 }
 
-export interface ErrorBody {
-  code: string
-  message: string
+/** 普通 HTTP 响应：成功 code=0，失败是非零整数；HTTP 状态码保持真实语义。 */
+export interface ApiResponse<T> {
+  code: number
+  msg: string
+  data: T
 }
 
-/** 后端统一错误响应体，见 backend/app/api/exception_handlers.py */
-export interface ApiErrorBody {
-  error: ErrorBody
+export interface ValidationIssue {
+  location: (string | number)[]
+  message: string
+  code: string
 }
+
+/** 错误同样采用 code/msg/data，校验详情位于 data.errors；不使用旧 error 包装。 */
+export type ApiErrorBody = ApiResponse<{ errors: ValidationIssue[] } | null>
 
 /* ── wallet ────────────────────────────────────────────── */
 
@@ -202,7 +208,7 @@ export interface StakingSummary extends DataQuality {
 
 export type RiskLevel = 'low' | 'medium' | 'high' | 'unknown'
 
-/** 除 explanation 外全部由后端代码计算，LLM 不参与 —— 数值可复现、可测试。 */
+/** 全部由后端代码计算，LLM 不参与 —— 数值可复现、可测试。 */
 export interface RiskReport extends DataQuality {
   /** 估值占比最高的资产；无可估值持仓时为 null */
   top_asset: string | null
@@ -228,86 +234,45 @@ export interface RiskReport extends DataQuality {
    */
   risk_level: RiskLevel
   computed_at: string
-  /** 由 LLM 生成；失败为 null，不影响数据可用 */
-  explanation: string | null
 }
 
-/* ── events（SSE，Agent 可观测性载体）──────────────────── */
+/* ── chat（持久化正文快照契约）────────────────────────── */
 
-interface AgentEventBase {
-  run_id: string
-  /** 单调递增，前端据此排序与补发 */
+/** 本人固定会话的内部标识，前端不提供会话列表或切换。 */
+export interface ChatSession {
+  id: string
+}
+/** 数据库消息的稳定 ID 和会话内顺序；流中更新覆盖同一条 assistant 消息。 */
+export interface ChatMessage {
+  id: string
+  turn_id: string
   seq: number
-}
-
-export interface RunStarted extends AgentEventBase {
-  type: 'run_started'
-  intent: string
-}
-
-export interface ToolStarted extends AgentEventBase {
-  type: 'tool_started'
-  tool: string
-  args: Record<string, unknown>
-}
-
-export interface ToolFinished extends AgentEventBase {
-  type: 'tool_finished'
-  tool: string
-  ok: boolean
-  duration_ms: number
-  /** 人类可读摘要，不传全量数据 */
-  result_digest: string
-}
-
-export interface TokenDelta extends AgentEventBase {
-  type: 'token_delta'
-  text: string
-}
-
-export interface RunFinished extends AgentEventBase {
-  type: 'run_finished'
-  answer: string
-  usage: Record<string, unknown>
-}
-
-export interface RunFailed extends AgentEventBase {
-  type: 'run_failed'
-  error: string
-  /** true = 部分数据源失败但结论仍可用 */
-  partial: boolean
-}
-
-export type AgentEvent =
-  | RunStarted
-  | ToolStarted
-  | ToolFinished
-  | TokenDelta
-  | RunFinished
-  | RunFailed
-
-/* ── agent ─────────────────────────────────────────────── */
-
-export interface ChatRequest {
-  message: string
-  address?: string | null
-  conversation_id?: string | null
-}
-
-export interface AnalyzePortfolioRequest {
-  address: string
-}
-
-export interface AnalyzePortfolioResponse {
-  address: string
-  report: RiskReport
-}
-
-/* ── health ────────────────────────────────────────────── */
-
-export interface HealthResponse {
+  role: 'user' | 'assistant'
+  content: string
   status: string
-  chain_id: number
+}
+/** 一页历史加恢复信息；active_turn_id 不为空时继续订阅后台生成。 */
+export interface MessagePage {
+  items: ChatMessage[]
+  next_cursor: number | null
+  active_turn_id: string | null
+  summary_version: number | null
+}
+/** 完整正文快照；version 属于轮次，不能与消息 seq 或 summary_version 混用。 */
+export interface TurnAccepted {
+  turn_id: string
+  created: boolean
+}
+
+export interface TurnSnapshot {
+  turn_id: string
+  session_id: string
+  version: number
+  status: string
+  message: ChatMessage
+  error: string | null
+  summary_version?: number | null
+  context_info?: { issues?: string[] }
 }
 
 /* ── auth（钱包登录）───────────────────────────────────── */
@@ -337,6 +302,7 @@ export interface VerifyRequest {
 
 export interface TokenResponse {
   token: string
+  token_type: string
   address: string
   expires_at: string
 }

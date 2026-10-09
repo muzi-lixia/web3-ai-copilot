@@ -29,3 +29,5 @@ dist-ssr/
 
 # 日志
 *.log
+
+docs

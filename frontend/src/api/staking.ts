@@ -1,5 +1,5 @@
-import { http } from './client'
-import type { StakingSummary } from '../types/api'
+import { http } from './client.ts'
+import type { ApiResponse, StakingSummary } from '../types/api'
 
 /**
  * 查询质押仓位。
@@ -12,6 +12,6 @@ import type { StakingSummary } from '../types/api'
  * 所以前端不要再自己拿两个接口的数相除 —— 那会变成第二份定义。
  */
 export async function fetchStakingPositions(address: string): Promise<StakingSummary> {
-  const { data } = await http.get<StakingSummary>(`/staking/${address}/positions`)
-  return data
+  const { data } = await http.get<ApiResponse<StakingSummary>>(`/wallets/${address}/staking-positions`)
+  return data.data
 }

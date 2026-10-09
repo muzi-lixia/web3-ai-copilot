@@ -8,7 +8,7 @@ import { useAuthStore } from '../stores/auth'
 /** 登录流程的阶段。页面按它显示"现在卡在哪一步"。 */
 export type LoginStage = 'idle' | 'nonce' | 'signing' | 'verifying' | 'done'
 
-export const STAGE_TEXT: Record<LoginStage, string> = {
+const STAGE_TEXT: Record<LoginStage, string> = {
   idle: '签名并登录',
   nonce: '正在获取签名消息…',
   signing: '请在钱包中确认签名',

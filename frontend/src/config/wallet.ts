@@ -24,10 +24,10 @@ if (!projectId) {
   )
 }
 
-/** 目前只登记 Berachain：后端链注册表也只有这一条（backend/app/constants/chains.py）。 */
+/** 目前只登记 Berachain：后端链注册表也只有这一条（backend/app/infrastructure/blockchain/chains.py）。 */
 const networks = [berachain] as [AppKitNetwork, ...AppKitNetwork[]]
 
-export const wagmiAdapter = new WagmiAdapter({ projectId, networks })
+const wagmiAdapter = new WagmiAdapter({ projectId, networks })
 
 createAppKit({
   adapters: [wagmiAdapter],

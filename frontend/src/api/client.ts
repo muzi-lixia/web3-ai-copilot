@@ -1,55 +1,48 @@
+/** Axios 公共请求：附带 JWT、校验 code/msg/data、统一异常并处理失效凭据。 */
 import axios, { AxiosError } from 'axios'
 
-import { useAuthStore } from '../stores/auth'
+import { useAuthStore } from '../stores/auth.ts'
+import { ApiError, responseError, unwrapResponse } from './response.ts'
 import type { ApiErrorBody } from '../types/api'
 
-/**
- * 统一请求实例。
- *
- * - baseURL 默认 `/api/v1`，开发期由 vite proxy 转发到 127.0.0.1:8000（见 vite.config.ts）
- * - 请求拦截自动带上登录凭证，业务代码不用每次手写 header
- * - 响应拦截把后端的 `{ error: { code, message } }` 结构拍平成 ApiError，
- *   业务代码只需 catch 一次，不用每个调用点判断 error.response?.data
- */
+export { ApiError } from './response.ts'
+
 export const http = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL ?? '/api/v1',
+  baseURL: import.meta.env?.VITE_API_BASE_URL ?? '/api/v1',
   timeout: 20_000,
 })
 
-export class ApiError extends Error {
-  readonly code: string
-  readonly status?: number
-
-  constructor(message: string, code = 'unknown', status?: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.code = code
-    this.status = status
-  }
-}
-
 http.interceptors.request.use((config) => {
   const { token } = useAuthStore.getState()
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
+  if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
 
+/** 迟到的旧 token 请求失败不能把用户刚建立的新登录状态清掉。 */
+function clearExpiredAuth(error: ApiError, authorization: unknown) {
+  const token = useAuthStore.getState().token
+  if ((error.status === 401 || error.code === 40101) && authorization === `Bearer ${token}`) {
+    useAuthStore.getState().clearAuth()
+  }
+}
+
 http.interceptors.response.use(
-  (response) => response,
-  (error: AxiosError<ApiErrorBody>) => {
-    const body = error.response?.data
-    const message = body?.error?.message ?? error.message ?? '网络请求失败'
-    const code = body?.error?.code ?? 'network_error'
-    const status = error.response?.status
-
-    // 凭证失效：清掉本地登录态，由路由守卫把人送回登录页。
-    // 不在这里做跳转 —— 请求层不该依赖 router，否则单测和复用都会被拖住。
-    if (status === 401) {
-      useAuthStore.getState().clearAuth()
+  (response) => {
+    // 204 按协议没有正文；其他普通 JSON 成功响应必须是 code/msg/data。
+    if (response.status === 204) return response
+    try {
+      unwrapResponse(response.data, response.status)
+    } catch (error) {
+      if (error instanceof ApiError) clearExpiredAuth(error, response.config.headers.Authorization)
+      throw error
     }
-
-    return Promise.reject(new ApiError(message, code, status))
+    // 保留 AxiosResponse，api 模块显式读取 data.data，类型与运行行为一致。
+    return response
+  },
+  (error: AxiosError<ApiErrorBody>) => {
+    if (axios.isCancel(error)) return Promise.reject(error)
+    const failure = responseError(error.response?.data, error.response?.status, error.message)
+    clearExpiredAuth(failure, error.config?.headers.Authorization)
+    return Promise.reject(failure)
   },
 )

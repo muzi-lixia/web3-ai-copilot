@@ -21,7 +21,11 @@ export function formatAmount(amount: string | null): string {
   const tail = frac.slice(0, 6).replace(/0+$/, '')
 
   if (tail) return `${head}.${tail}`
-  return /[1-9]/.test(frac) ? '<0.000001' : head
+  // 只有整数部分为零的微量余额才使用阈值提示，1.00000001 不能误显示成小于百万分之一。
+  if (/^-?0$/.test(int) && /[1-9]/.test(frac)) {
+    return int.startsWith('-') ? '>-0.000001' : '<0.000001'
+  }
+  return head
 }
 
 /**
@@ -35,7 +39,9 @@ export function formatValue(value: string | null): string {
   const head = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const cents = frac.slice(0, 2).padEnd(2, '0')
 
-  if (int === '0' && cents === '00' && /[1-9]/.test(frac)) return '<$0.01'
+  if (/^-?0$/.test(int) && cents === '00' && /[1-9]/.test(frac)) {
+    return int.startsWith('-') ? '>-$0.01' : '<$0.01'
+  }
   return `$${head}.${cents}`
 }
 
