@@ -6,12 +6,11 @@ export function mergeMessages(older: ChatMessage[], newer: ChatMessage[]) {
   return [...byId.values()].sort((a, b) => a.seq - b.seq)
 }
 
-/** 逐项说明上下文降级原因，摘要生成失败不能被误报为压缩已经成功。 */
-export function contextIssueMessages(issues: string[]) {
-  const messages: Record<string, string> = {
-    summary_failed: '本轮摘要生成失败，保留原历史和已有摘要继续回答',
-    context_trimmed: '为满足模型输入预算，本轮省略了部分较早历史，原文仍保存在服务器',
-    summary_omitted: '摘要仍超出预算，本轮未使用摘要，原文仍保存在服务器',
+/** 执行阶段用于展示，不等同于数据库轮次状态；展示当前 queued/running 状态。 */
+export function turnProgressText(phase?: string) {
+  const labels: Record<string, string> = {
+    queued: '正在等待模型额度…',
+    running: '正在查询并生成回复…',
   }
-  return [...new Set(issues)].map((issue) => messages[issue] ?? `上下文处理提示：${issue}`)
+  return labels[phase ?? 'queued'] ?? '正在处理回复…'
 }

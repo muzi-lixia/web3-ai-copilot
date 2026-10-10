@@ -27,9 +27,9 @@ from datetime import UTC, datetime
 import httpx
 
 from app.common.singleflight import singleflight
-from app.core.config import settings
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
+from app.core.resources import BusinessResources, resolve_resources
 from app.infrastructure.blockchain.chains import ChainMeta, get_chain
 from app.infrastructure.providers.market import RawQuote, fetch_defillama, fetch_dexscreener
 from app.modules.asset.tokens import TokenMeta, price_address_of, tokens_for
@@ -40,17 +40,19 @@ logger = get_logger(__name__)
 
 # chain_id → (过期时刻, {symbol: TokenMarket})
 # 用单调时钟计时而不是墙钟：系统时间被校准不该让缓存提前失效或永不过期。
-_cache: dict[int, tuple[float, dict[str, TokenMarket]]] = {}
+
 
 # 同链并发刷新由 _load 的 singleflight 合并，上游缓存只保留有界 TTL 数据。
 
 
-async def get_quotes(chain_id: int, symbols: list[str] | None = None) -> TokenMarketList:
+async def get_quotes(
+    chain_id: int, symbols: list[str] | None = None, *, resources: BusinessResources | None = None
+) -> TokenMarketList:
     """取某条链的行情。symbols 为空/None 表示返回该链候选清单的全部。"""
     chain = get_chain(chain_id)
     wanted, unknown = _select(tokens_for(chain_id), symbols)
 
-    quotes = await _load(chain)
+    quotes = await _load(chain, resources=resources)
 
     return TokenMarketList(
         chain_id=chain.chain_id,
@@ -84,12 +86,17 @@ def _select(tokens: tuple[TokenMeta, ...], symbols: list[str] | None) -> tuple[l
     return picked, unknown
 
 
-def _usable_quotes(quotes: dict[str, TokenMarket]) -> dict[str, TokenMarket]:
+def _usable_quotes(
+    quotes: dict[str, TokenMarket], *, resources: BusinessResources | None = None
+) -> dict[str, TokenMarket]:
     """按报价实际时间过滤缓存，拒绝超出最大年龄或时间位于未来的报价。
 
     缓存项 TTL 只决定是否刷新，不能替代单个上游报价的有效时间判断。
     """
-    max_age = settings.market_cache_ttl + settings.market_max_stale_seconds
+    max_age = (
+        resolve_resources(resources).settings.market_cache_ttl
+        + resolve_resources(resources).settings.market_max_stale_seconds
+    )
     now = datetime.now(UTC)
     return {
         symbol: quote
@@ -99,28 +106,37 @@ def _usable_quotes(quotes: dict[str, TokenMarket]) -> dict[str, TokenMarket]:
 
 
 @singleflight
-async def _load(chain: ChainMeta) -> dict[str, TokenMarket]:
+async def _load(chain: ChainMeta, *, resources: BusinessResources | None = None) -> dict[str, TokenMarket]:
     """取该链的行情表，带缓存与降级。"""
     # 缓存键按链隔离，公共行情可共享；用户余额和私有对话不能放进这份缓存。
-    cached = _cache.get(chain.chain_id)
+    cached = resolve_resources(resources).market_cache.get(chain.chain_id)
     if cached is not None and cached[0] > time.monotonic():
-        return _usable_quotes(cached[1])
+        return _usable_quotes(cached[1], resources=resources)
 
     try:
-        fresh = await _fetch(chain)
+        fresh = await _fetch(chain, resources=resources)
     except UpstreamError as exc:
-        if cached is None or time.monotonic() - cached[0] > settings.market_max_stale_seconds:
+        if (
+            cached is None
+            or time.monotonic() - cached[0] > resolve_resources(resources).settings.market_max_stale_seconds
+        ):
             raise
         # 两个源都挂了：过期的价格也比空表有用，但必须标出来 ——
         # 不标的话用户看到的是旧价却以为是当前价，比看不到更糟。
         logger.warning("行情刷新失败，回退过期缓存：%s", exc)
-        return {s: q.model_copy(update={"stale": True}) for s, q in _usable_quotes(cached[1]).items()}
+        return {
+            s: q.model_copy(update={"stale": True})
+            for s, q in _usable_quotes(cached[1], resources=resources).items()
+        }
 
-    _cache[chain.chain_id] = (time.monotonic() + settings.market_cache_ttl, fresh)
+    resolve_resources(resources).market_cache[chain.chain_id] = (
+        time.monotonic() + resolve_resources(resources).settings.market_cache_ttl,
+        fresh,
+    )
     return fresh
 
 
-async def _fetch(chain: ChainMeta) -> dict[str, TokenMarket]:
+async def _fetch(chain: ChainMeta, *, resources: BusinessResources | None = None) -> dict[str, TokenMarket]:
     """同时问两个源，再按 token 合并。只要有一个源活着就算成功。"""
     targets = _targets(tokens_for(chain.chain_id))
     if not targets:
@@ -131,13 +147,13 @@ async def _fetch(chain: ChainMeta) -> dict[str, TokenMarket]:
     addresses = tuple(original for original, _ in targets.values())
 
     async with httpx.AsyncClient(
-        timeout=settings.market_timeout_seconds,
-        proxy=settings.market_proxy or None,
+        timeout=resolve_resources(resources).settings.market_timeout_seconds,
+        proxy=resolve_resources(resources).settings.market_proxy or None,
         headers={"accept": "application/json"},
     ) as client:
         results = await asyncio.gather(
-            fetch_dexscreener(client, chain, addresses),
-            fetch_defillama(client, chain, addresses),
+            fetch_dexscreener(client, chain, addresses, resources=resources),
+            fetch_defillama(client, chain, addresses, resources=resources),
             return_exceptions=True,
         )
 
@@ -158,7 +174,10 @@ async def _fetch(chain: ChainMeta) -> dict[str, TokenMarket]:
             and quote.updated_at
             and not 0
             <= (datetime.now(UTC) - quote.updated_at).total_seconds()
-            <= (settings.market_cache_ttl + settings.market_max_stale_seconds)
+            <= (
+                resolve_resources(resources).settings.market_cache_ttl
+                + resolve_resources(resources).settings.market_max_stale_seconds
+            )
         ):
             quote = None
         if quote is None:

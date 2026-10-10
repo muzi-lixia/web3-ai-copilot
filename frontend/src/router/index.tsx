@@ -6,27 +6,29 @@ import Copilot from '../views/Copilot'
 import Dashboard from '../views/Dashboard'
 import Login from '../views/Login'
 import Market from '../views/Market'
-import Portfolio from '../views/Portfolio'
+import Assets from '../views/Assets'
+import Services from '../views/Services'
+import Settings from '../views/Settings'
+import Knowledge from '../views/Knowledge'
 import Risk from '../views/Risk'
 import Staking from '../views/Staking'
 
 export const router = createBrowserRouter([
-  { path: '/login', element: <Login /> },
   {
     path: '/',
-    element: (
-      <RequireAuth>
-        <AppLayout />
-      </RequireAuth>
-    ),
+    element: <AppLayout />,
     children: [
-      { index: true, element: <Navigate to="/dashboard" replace /> },
-      { path: 'dashboard', element: <Dashboard /> },
-      { path: 'portfolio', element: <Portfolio /> },
+      { path: 'login', element: <Login /> },
+      { path: 'services', element: <Services /> },
+      { path: 'settings', element: <Settings /> },
+      { path: 'knowledge', element: <Knowledge /> },
+      { index: true, element: <Navigate to="/copilot" replace /> },
+      { path: 'dashboard', element: <RequireAuth><Dashboard /></RequireAuth> },
+      { path: 'portfolio', element: <RequireAuth><Assets /></RequireAuth> },
       { path: 'market', element: <Market /> },
-      { path: 'risk', element: <Risk /> },
-      { path: 'staking', element: <Staking /> },
-      { path: 'copilot', element: <Copilot /> },
+      { path: 'risk', element: <RequireAuth><Risk /></RequireAuth> },
+      { path: 'staking', element: <RequireAuth><Staking /></RequireAuth> },
+      { path: 'copilot', element: <RequireAuth><Copilot /></RequireAuth> },
     ],
   },
 ])

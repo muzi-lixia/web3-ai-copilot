@@ -1,27 +1,19 @@
-"""质押仓位路由（功能点 4）。
-
-    GET /wallets/{address}/staking-positions?chain_id=80094
-
-与资产、风险接口同样的两道约束：只能查自己；阻塞调用不进这一层
-（链上读取已在 `staking_service` 内部丢进线程池）。
-"""
+"""当前用户业务接口：查询目标只能来自有效登录凭证，禁止客户端填写地址。"""
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.dependencies import get_current_address
+from app.api.dependencies import BusinessResourcesDep, get_current_address
 from app.api.responses import success
-from app.common.schemas import Address, ApiResponse
-from app.core.config import settings
-from app.core.exceptions import ForbiddenError
+from app.common.schemas import ApiResponse
 from app.modules.staking import service as staking_service
 from app.modules.staking.schemas import StakingSummary
 
-router = APIRouter(prefix="/wallets", tags=["staking"])
+router = APIRouter(prefix="/me", tags=["质押"])
 
 
-@router.get("/{address}/staking-positions", response_model=ApiResponse[StakingSummary], summary="质押仓位")
+@router.get("/staking-positions", response_model=ApiResponse[StakingSummary], summary="质押仓位")
 async def get_positions(
-    address: Address,
+    resources: BusinessResourcesDep,
     chain_id: int | None = Query(default=None, gt=0, description="不传则用默认链（见配置 default_chain_id）"),
     current_address: str = Depends(get_current_address),
 ) -> dict:
@@ -31,7 +23,8 @@ async def get_positions(
     取不到时为 null —— 不是 0。数值全部来自链上或该接口，
     本层不做任何估算。
     """
-    if address.lower() != current_address.lower():
-        raise ForbiddenError("只能查询当前登录钱包的质押仓位")
-
-    return success(await staking_service.get_summary(chain_id or settings.default_chain_id, address))
+    return success(
+        await staking_service.get_summary(
+            chain_id or resources.settings.default_chain_id, current_address, resources=resources
+        )
+    )

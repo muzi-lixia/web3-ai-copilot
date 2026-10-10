@@ -19,9 +19,9 @@ from requests.exceptions import Timeout
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 
-from app.core.config import settings
 from app.core.exceptions import InvalidAddressError, UpstreamError
 from app.core.logging import get_logger
+from app.core.resources import BusinessResources, resolve_resources
 from app.infrastructure.blockchain.chains import ChainMeta
 from app.modules.asset.tokens import TokenMeta
 
@@ -83,20 +83,19 @@ BALANCE_OF_SELECTOR = Web3.keccak(text="balanceOf(address)")[:4]
 
 # 每条链记住最后一个连通的节点。换节点等于换数据源，不同节点间存在区块高度差，
 # 频繁切换会让同一个钱包的余额忽高忽低。
-_good_rpc: dict[int, str] = {}
 
 
-def _candidate_urls(chain: ChainMeta) -> list[str]:
+def _candidate_urls(chain: ChainMeta, *, resources: BusinessResources | None = None) -> list[str]:
     """候选节点顺序：env 覆盖优先，其次链注册表里的公共节点；上次成功的排最前。"""
-    overridden = settings.rpc_override_map.get(chain.chain_id)
+    overridden = resolve_resources(resources).settings.rpc_override_map.get(chain.chain_id)
     urls = overridden if overridden else list(chain.rpc_urls)
-    preferred = _good_rpc.get(chain.chain_id)
+    preferred = resolve_resources(resources).good_rpc.get(chain.chain_id)
     if preferred and preferred in urls:
         return [preferred, *(u for u in urls if u != preferred)]
     return urls
 
 
-def connect(chain: ChainMeta) -> Web3:
+def connect(chain: ChainMeta, *, resources: BusinessResources | None = None) -> Web3:
     """返回一个已确认可用的 Web3；全部节点不可用则抛 UpstreamError。
 
     每次连接都真发一次请求（读 chain_id），而不是只看 `is_connected()`：
@@ -106,7 +105,7 @@ def connect(chain: ChainMeta) -> Web3:
     """
     failures: list[str] = []
 
-    for index, url in enumerate(_candidate_urls(chain), start=1):
+    for index, url in enumerate(_candidate_urls(chain, resources=resources), start=1):
         try:
             w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": RPC_TIMEOUT_SECONDS}))
             actual_chain_id = w3.eth.chain_id
@@ -118,7 +117,7 @@ def connect(chain: ChainMeta) -> Web3:
             failures.append(f"节点{index} (chain_id={actual_chain_id}，期望 {chain.chain_id})")
             continue
 
-        _good_rpc[chain.chain_id] = url
+        resolve_resources(resources).good_rpc[chain.chain_id] = url
         logger.debug("%s 使用节点 %s", chain.name, index)
         return w3
 
@@ -174,20 +173,22 @@ def read_erc20_balances(
 _T = TypeVar("_T")
 
 
-def read_with_failover(chain: ChainMeta, operation: Callable[[Web3], _T]) -> _T:
+def read_with_failover(
+    chain: ChainMeta, operation: Callable[[Web3], _T], *, resources: BusinessResources | None = None
+) -> _T:
     """在传输故障时换节点重新执行整段只读操作。
 
     每个候选节点先核对 chain_id，成功后记住节点。合约逻辑错误、业务错误和
     非传输异常不会换节点重试，因为更换节点不能修复确定性的合约或参数问题。
     operation 必须幂等且只读，不能把转账等有副作用操作放进此重试入口。
     """
-    for index, url in enumerate(_candidate_urls(chain), start=1):
+    for index, url in enumerate(_candidate_urls(chain, resources=resources), start=1):
         try:
             w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": RPC_TIMEOUT_SECONDS}))
             if w3.eth.chain_id != chain.chain_id:
                 continue
             result = operation(w3)
-            _good_rpc[chain.chain_id] = url
+            resolve_resources(resources).good_rpc[chain.chain_id] = url
             return result
         except (Timeout, RequestsConnectionError, ConnectionError, TimeoutError) as exc:
             logger.warning("%s 节点 %s 传输失败 (%s)", chain.name, index, type(exc).__name__)

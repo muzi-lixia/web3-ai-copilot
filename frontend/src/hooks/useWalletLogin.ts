@@ -2,6 +2,7 @@ import { useAppKit } from '@reown/appkit/react'
 import { useCallback, useState } from 'react'
 import { useAccount, useDisconnect, useSignMessage } from 'wagmi'
 
+import { http } from '../api/client'
 import { fetchNonce, verifySignature } from '../api/auth'
 import { useAuthStore } from '../stores/auth'
 
@@ -35,11 +36,13 @@ export function useWalletLogin() {
   const { signMessageAsync } = useSignMessage()
   const setAuth = useAuthStore((state) => state.setAuth)
 
+  const [signingMessage, setSigningMessage] = useState<string | null>(null)
   const [stage, setStage] = useState<LoginStage>('idle')
   const [error, setError] = useState<string | null>(null)
 
   const login = useCallback(async () => {
     setError(null)
+    setSigningMessage(null)
 
     // 1. 还没连钱包：只负责把弹窗打开，本轮到此为止。
     if (!isConnected || !address) {
@@ -51,6 +54,7 @@ export function useWalletLogin() {
       // 2. 取 nonce（后端连签名原文一起下发）
       setStage('nonce')
       const nonce = await fetchNonce(address)
+      setSigningMessage(nonce.message)
 
       // 3. 签名 —— 签的是后端下发的原文，不是前端拼的。
       //    两端各拼一次模板，迟早会因为空格/换行不一致而"莫名"验签失败。
@@ -59,8 +63,8 @@ export function useWalletLogin() {
 
       // 4. 换登录凭证
       setStage('verifying')
-      const result = await verifySignature({ address, signature })
-      setAuth(result.token, result.address)
+      const result = await verifySignature({ message: nonce.message, signature })
+      setAuth(result.token, result.address, result.refresh_token, result)
       setStage('done')
       return result.address
     } catch (err) {
@@ -73,7 +77,8 @@ export function useWalletLogin() {
   }, [address, isConnected, open, signMessageAsync, setAuth])
 
   const logout = useCallback(async () => {
-    useAuthStore.getState().clearAuth()
+    try { await http.delete('/auth/session') } catch { /* 服务不可达时仍清除本地身份 */ }
+    useAuthStore.getState().clearAuth('logout')
     try {
       await disconnectAsync()
     } catch {
@@ -90,6 +95,7 @@ export function useWalletLogin() {
     logout,
     stage,
     stageText: STAGE_TEXT[stage],
+    signingMessage,
     error,
     busy,
     /** 已连接钱包但还没换到凭证——页面据此把按钮文案切成"签名并登录"。 */

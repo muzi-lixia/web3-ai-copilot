@@ -29,9 +29,9 @@ from typing import Any
 
 import httpx
 
-from app.core.config import settings
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
+from app.core.resources import BusinessResources, resolve_resources
 
 logger = get_logger(__name__)
 
@@ -73,25 +73,26 @@ class StakeEarnings:
 
 
 # interval → (过期时刻, StakeApy)。APY 是全链一个数，不随地址变化。
-_apy_cache: dict[str, tuple[float, StakeApy]] = {}
 
 
-def _headers() -> dict[str, str]:
+def _headers(*, resources: BusinessResources | None = None) -> dict[str, str]:
     """构造 Beep 必需的稳定调用方标识与 JSON 接受头，标识来自部署配置。"""
-    return {"accept": "application/json", "X-Client-Id": settings.beep_client_id}
+    return {"accept": "application/json", "X-Client-Id": resolve_resources(resources).settings.beep_client_id}
 
 
-def _client() -> httpx.AsyncClient:
+def _client(*, resources: BusinessResources | None = None) -> httpx.AsyncClient:
     """创建使用统一超时、代理和请求头的短生命周期客户端，由调用方关闭。"""
     return httpx.AsyncClient(
-        base_url=settings.beep_base_url,
-        timeout=settings.beep_timeout_seconds,
-        proxy=settings.market_proxy or None,
-        headers=_headers(),
+        base_url=resolve_resources(resources).settings.beep_base_url,
+        timeout=resolve_resources(resources).settings.beep_timeout_seconds,
+        proxy=resolve_resources(resources).settings.market_proxy or None,
+        headers=_headers(resources=resources),
     )
 
 
-async def get_stake_apy(interval: str = DEFAULT_APY_INTERVAL) -> StakeApy:
+async def get_stake_apy(
+    interval: str = DEFAULT_APY_INTERVAL, *, resources: BusinessResources | None = None
+) -> StakeApy:
     """取质押年化。失败抛 UpstreamError。
 
     带缓存：金库收益按批注入（初期每周 2~3 次），秒级刷新拿到的还是同一个数，
@@ -100,12 +101,12 @@ async def get_stake_apy(interval: str = DEFAULT_APY_INTERVAL) -> StakeApy:
     if interval not in APY_INTERVALS:
         raise UpstreamError(f"未知的 APY 口径 {interval}，可选：{', '.join(APY_INTERVALS)}")
 
-    cached = _apy_cache.get(interval)
+    cached = resolve_resources(resources).apy_cache.get(interval)
     if cached is not None and cached[0] > time.monotonic():
         return cached[1]
 
     try:
-        payload = await _get("/v1/stake/apy", params={"interval": interval})
+        payload = await _get("/v1/stake/apy", params={"interval": interval}, resources=resources)
     except _NotComputable as exc:
         # 年化端点不该返回 422（参数错是 400），真发生了也当成"上游说没有"处理，
         # 而不是让它冒成 500 —— 它是个注解层，不值得把整页打掉。
@@ -122,14 +123,19 @@ async def get_stake_apy(interval: str = DEFAULT_APY_INTERVAL) -> StakeApy:
     except (TypeError, ValueError) as exc:
         raise UpstreamError(f"Beep 返回的年化无法解析：{apy!r}") from exc
 
-    _apy_cache[interval] = (time.monotonic() + settings.beep_cache_ttl, result)
+    resolve_resources(resources).apy_cache[interval] = (
+        time.monotonic() + resolve_resources(resources).settings.beep_cache_ttl,
+        result,
+    )
     return result
 
 
-async def get_stake_earnings(vault: str, owner: str) -> StakeEarnings | None:
+async def get_stake_earnings(
+    vault: str, owner: str, *, resources: BusinessResources | None = None
+) -> StakeEarnings | None:
     """取地址在该金库上的收益。**无法精确计算时返回 None**（见模块头第 2 条）。"""
     try:
-        payload = await _get(f"/v1/stake/{vault}/earnings/{owner}")
+        payload = await _get(f"/v1/stake/{vault}/earnings/{owner}", resources=resources)
     except _NotComputable:
         logger.info("Beep 无法精确计算 %s 的收益（历史流水不足），本次留空", owner)
         return None
@@ -149,10 +155,12 @@ class _NotComputable(Exception):
     """内部信号：上游明确表示"这个值算不出来"，不是故障。"""
 
 
-async def _get(path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+async def _get(
+    path: str, params: dict[str, str] | None = None, *, resources: BusinessResources | None = None
+) -> dict[str, Any]:
     """发一次 GET 并返回 JSON 对象。失败一律转成 UpstreamError。"""
     try:
-        async with _client() as client:
+        async with _client(resources=resources) as client:
             response = await client.get(path, params=params)
     except httpx.HTTPError as exc:
         raise UpstreamError(f"Beep 请求失败：{type(exc).__name__}") from exc
@@ -171,7 +179,9 @@ async def _get(path: str, params: dict[str, str] | None = None) -> dict[str, Any
     return payload
 
 
-async def get_stake_apy_safe(interval: str = DEFAULT_APY_INTERVAL) -> StakeApy | None:
+async def get_stake_apy_safe(
+    interval: str = DEFAULT_APY_INTERVAL, *, resources: BusinessResources | None = None
+) -> StakeApy | None:
     """吞掉 UpstreamError 的版本。
 
     APY 是**注解层**，不是质押仓位的主体 —— 拿不到只该少一个数字，
@@ -179,13 +189,15 @@ async def get_stake_apy_safe(interval: str = DEFAULT_APY_INTERVAL) -> StakeApy |
     处理是同一条口径。
     """
     try:
-        return await get_stake_apy(interval)
+        return await get_stake_apy(interval, resources=resources)
     except UpstreamError as exc:
         logger.warning("质押年化不可用：%s", exc)
         return None
 
 
-async def gather_earnings(vaults: list[str], owner: str) -> dict[str, StakeEarnings | None]:
+async def gather_earnings(
+    vaults: list[str], owner: str, *, resources: BusinessResources | None = None
+) -> dict[str, StakeEarnings | None]:
     """并发取多个金库的收益；单个失败只丢它自己。键是金库地址小写。"""
     if not vaults:
         return {}
@@ -193,7 +205,7 @@ async def gather_earnings(vaults: list[str], owner: str) -> dict[str, StakeEarni
     async def one(vault: str) -> StakeEarnings | None:
         """单个金库收益失败时记录原因并返回 None，让其他金库的查询正常完成。"""
         try:
-            return await get_stake_earnings(vault, owner)
+            return await get_stake_earnings(vault, owner, resources=resources)
         except UpstreamError as exc:
             logger.warning("金库 %s 的收益不可用：%s", vault, exc)
             return None

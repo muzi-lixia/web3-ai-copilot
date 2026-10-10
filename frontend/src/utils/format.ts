@@ -33,35 +33,17 @@ export function formatAmount(amount: string | null): string {
  *
  * 有值但不到一分显示 `<$0.01` 而不是 `$0.00` —— 后者读起来像"没有资产"。
  */
-export function formatValue(value: string | null): string {
+export function formatValue(value: string | null, currency = 'USD'): string {
   if (value === null) return '—'
   const [int, frac = ''] = value.split('.')
   const head = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const cents = frac.slice(0, 2).padEnd(2, '0')
+  const sign = currency === 'CNY' ? '¥' : '$'
 
   if (/^-?0$/.test(int) && cents === '00' && /[1-9]/.test(frac)) {
-    return int.startsWith('-') ? '>-$0.01' : '<$0.01'
+    return int.startsWith('-') ? `>-${sign}0.01` : `<${sign}0.01`
   }
-  return `$${head}.${cents}`
-}
-
-/**
- * 单价展示：按量级自适应位数。
- *
- * 小于 1 的币从第一个非零数字起取 4 位，否则 `$0.00001234` 会被两位小数
- * 截成 `$0.00`，看着像这个币归零了。
- */
-export function formatPrice(value: string | null): string {
-  if (value === null) return '—'
-  const [int, frac = ''] = value.split('.')
-  const head = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-
-  if (int !== '0') return frac ? `$${head}.${frac.slice(0, 2)}` : `$${head}`
-
-  const start = frac.search(/[1-9]/)
-  if (start < 0) return '$0'
-  const digits = frac.slice(0, start + 4).replace(/0+$/, '')
-  return digits ? `$0.${digits}` : '$0'
+  return `${sign}${head}.${cents}`
 }
 
 /**
@@ -77,4 +59,19 @@ export function formatRatio(value: number | null, digits = 1): string | null {
 /** 0x1234…abcd —— 完整地址放 Tooltip 或 title 里。 */
 export function shorten(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`
+}
+
+
+/** USD 正文与悬停提示均最多保留 6 位小数，去除尾零。
+ * 仅操作十进制字符串，不改变后端金额，也不引入浮点精度损失。
+ */
+export function formatUsd(value: string | null): string {
+  if (value === null) return '—'
+  const [int, frac = ''] = value.split('.')
+  const head = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  const tail = frac.slice(0, 6).replace(/0+$/, '')
+  if (/^-?0$/.test(int) && !tail && /[1-9]/.test(frac)) {
+    return int.startsWith('-') ? '>-$0.000001' : '<$0.000001'
+  }
+  return `$${head}${tail ? '.' + tail : ''}`
 }

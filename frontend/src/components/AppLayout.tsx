@@ -1,88 +1,58 @@
-import { Button, Layout, Menu, Space, Tag, Tooltip, Typography } from 'antd'
-import { Link, Outlet, useLocation } from 'react-router-dom'
-
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Button, Space, Tag, Typography } from 'antd'
+import { useEffect, useRef } from 'react'
+import { NavLink, Outlet, useLocation, Link } from 'react-router-dom'
+import { getChains } from '../api/resources'
+import { http } from '../api/client'
+import { agentHttp } from '../api/chat'
 import { useWalletLogin } from '../hooks/useWalletLogin'
+import { useSessionProbe } from '../hooks/useSessionProbe'
 import { useAuthStore } from '../stores/auth'
 import { shorten } from '../utils/format'
-
-const { Content, Header, Sider } = Layout
-
-/** 侧边导航。key 用 pathname，选中态直接由当前路由推导，不用额外 state。 */
-const NAV = [
-  { key: '/dashboard', label: <Link to="/dashboard">Dashboard</Link> },
-  { key: '/portfolio', label: <Link to="/portfolio">Portfolio</Link> },
-  { key: '/market', label: <Link to="/market">Market</Link> },
-  { key: '/risk', label: <Link to="/risk">Risk</Link> },
-  { key: '/staking', label: <Link to="/staking">Staking</Link> },
-  { key: '/copilot', label: <Link to="/copilot">Copilot</Link> },
+import { readChatCache } from '../utils/chatCache'
+import ModelSelector from './ModelSelector'
+const groups: [string, [string, string, string][]][] = [
+  ['Agent', [['/copilot', '◉', '对话'], ['/login', '◎', '连接钱包']]],
+  ['基础服务 · 独立可复用', [['/portfolio', '▣', '代币余额'], ['/market', '◈', '行情'], ['/services', '◇', '服务与接口']]],
+  ['知识库 · 规划中', [['/knowledge', '▤', 'RAG 知识库']]],
 ]
-
 export default function AppLayout() {
   const { pathname } = useLocation()
-  const address = useAuthStore((state) => state.address)
-  const { logout } = useWalletLogin()
-
-  return (
-    // 外层锁死视口高度并把溢出裁掉 —— 整页不再产生滚动条，滚动全部交给下面的 <main>。
-    // 注意是 `height` 而不是 `minHeight`：后者允许被内容撑高，撑高之后 body 就滚起来了。
-    <Layout style={{ height: '100vh', overflow: 'hidden' }}>
-      <Sider
-        theme="light"
-        width={208}
-        // 菜单超出时自己滚，不把外层撑高。
-        style={{ borderRight: '1px solid #f0f0f0', overflow: 'auto' }}
-      >
-        <div style={{ padding: '18px 16px', fontWeight: 600, fontSize: 15 }}>Web3 AI Copilot</div>
-        <Menu mode="inline" selectedKeys={[pathname]} items={NAV} style={{ borderInlineEnd: 0 }} />
-      </Sider>
-
-      <Layout>
-        <Header
-          style={{
-            background: '#fff',
-            paddingInline: 24,
-            height: 56,
-            lineHeight: '56px',
-            borderBottom: '1px solid #f0f0f0',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}
-        >
-          <Tag color="green">Berachain</Tag>
-
-          <Space size={12}>
-            {address ? (
-              <>
-                <Tooltip title={address}>
-                  <Typography.Text copyable={{ text: address }} style={{ fontSize: 14 }}>
-                    {shorten(address)}
-                  </Typography.Text>
-                </Tooltip>
-                <Button size="small" onClick={logout}>
-                  退出
-                </Button>
-              </>
-            ) : (
-              <Typography.Text type="secondary" style={{ fontSize: 14 }}>
-                未登录
-              </Typography.Text>
-            )}
-          </Space>
-        </Header>
-
-        {/*
-          全站唯一的滚动容器。antd 的 Content 渲染出来就是 <main>。
-
-          antd 的 .ant-layout-content 本身已经是 flex:auto + min-height:0，这里仍显式
-          写出来：这两个值是"内滚"成立的前提（flex 子项的 min-height 初始值是 auto，
-          不为 0 的话内容会把盒子撑高、溢出到 body 上，又退回整页滚动），
-          不能依赖某个组件库版本恰好给对了。
-        */}
-        <Content style={{ padding: 24, flex: 1, minHeight: 0, overflow: 'auto' }}>
-          <Outlet />
-        </Content>
-      </Layout>
-    </Layout>
-  )
+  const address = useAuthStore(s => s.address)
+  const token = useAuthStore(s => s.token)
+  const { logout, address: connectedAddress, isConnected } = useWalletLogin()
+  useSessionProbe(token)
+  useEffect(() => {
+    const owner = address ?? readChatCache()?.owner
+    if (isConnected && connectedAddress && owner && connectedAddress.toLowerCase() !== owner.toLowerCase()) {
+      // 已连接钱包更换后，必须重新签名；旧 JWT 不能代表新钱包。
+      useAuthStore.getState().clearAuth('switch')
+    }
+  }, [isConnected, connectedAddress, address])
+  const cache = useQueryClient()
+  const previous = useRef(address)
+  useEffect(() => {
+    if (previous.current !== address) {
+      // 删除旧身份缓存；公共行情与网络目录可以保留。
+      cache.removeQueries({ predicate: q => !['chains', 'market-quotes', 'service-health'].includes(String(q.queryKey[0])) })
+      previous.current = address
+    }
+  }, [address, cache])
+  const chains = useQuery({ queryKey: ['chains'], queryFn: getChains })
+  const health = useQuery({ queryKey: ['service-health'], queryFn: async () => {
+    const results = await Promise.allSettled([http.get(import.meta.env.VITE_FOUNDATION_HEALTH_URL ?? '/foundation-health', { baseURL: '' }), agentHttp.get(import.meta.env.VITE_AGENT_HEALTH_URL ?? '/agent-health', { baseURL: '' })])
+    return results.map(r => r.status === 'fulfilled')
+  }, refetchInterval: 30000 })
+  const title = groups.flatMap(g => g[1]).find(n => n[0] === pathname)?.[2] ?? ({ '/dashboard': '概览', '/risk': '风险分析', '/staking': '质押' }[pathname] ?? '会话与设置')
+  return <div className="app-shell"><aside className="rail">
+    <div className="brand"><div className="logo">W3</div><div><strong>Web3 助手</strong><small>资产查询 · 只读 Agent</small></div></div>
+    <nav>{groups.map(([label, entries]) => <div className="nav-group" key={label}><div className="nav-label">{label}</div>
+      {entries.map(([path, icon, text]) => <NavLink className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`} to={path} key={path}><span>{icon}</span>{text}{!token && ['/copilot', '/portfolio'].includes(path) && <span className="lock">需登录</span>}</NavLink>)}
+    </div>)}<details className="business-links"><summary>已有业务</summary><NavLink className="nav-item" to="/dashboard">概览</NavLink><NavLink className="nav-item" to="/risk">风险分析</NavLink><NavLink className="nav-item" to="/staking">质押</NavLink></details></nav>
+    <div className="rail-foot">{['基础服务', 'Agent 服务'].map((name, i) => <div className="connection" key={name}><i className={health.data?.[i] ? 'dot ok' : 'dot warn'} />{name} · {health.isFetching && !health.data ? '检查中' : health.data?.[i] ? '在线' : '未连接'}</div>)}
+      <NavLink className="nav-item" to="/settings">⚙ 会话与设置</NavLink></div>
+  </aside><div className="main-shell"><header className="topbar"><strong>{title}</strong><Space>
+    <Tag>{chains.data ? `${chains.data.length} 个网络` : '网络目录加载中'}</Tag><ModelSelector />
+    {address ? <><span className="chip readonly"><span className="muted">钱包 · 只读</span><Typography.Text copyable={{ text: address }}>{shorten(address)}</Typography.Text></span><Button size="small" onClick={logout}>退出</Button></> : <Link to="/login"><Button size="small" type="primary">连接钱包</Button></Link>}
+  </Space></header><main className={`page-content ${pathname === '/copilot' ? 'chat-page' : ''}`}><Outlet /></main></div></div>
 }

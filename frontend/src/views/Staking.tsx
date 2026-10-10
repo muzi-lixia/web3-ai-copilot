@@ -186,7 +186,7 @@ export default function Staking() {
 
   const { data, error, isFetching } = useQuery({
     queryKey: ['staking-positions', address],
-    queryFn: () => fetchStakingPositions(address!),
+    queryFn: () => fetchStakingPositions(),
     enabled: Boolean(address),
   })
 

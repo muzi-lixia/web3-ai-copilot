@@ -48,13 +48,6 @@ test('business SSE error is distinct from retryable network EOF', async () => {
   assert.deepEqual(parseSSEEvent('{"type":"done"}'), { type: 'done' })
 })
 
-test('summary failure and history trimming have different explanations', async () => {
-  const { contextIssueMessages } = await import('../src/utils/chat.ts')
-  assert.match(contextIssueMessages(['summary_failed'])[0], /摘要生成失败/)
-  assert.match(contextIssueMessages(['context_trimmed'])[0], /省略.*历史/)
-  assert.equal(contextIssueMessages(['summary_failed', 'summary_failed']).length, 1)
-})
-
 // 重复分页和迟到旧历史不能把同一消息重复显示，也不能覆盖正在展示的新正文。
 test('history merge deduplicates repeated pages and keeps the latest snapshot', async () => {
   const { mergeMessages } = await import('../src/utils/chat.ts')
@@ -67,4 +60,26 @@ test('history merge deduplicates repeated pages and keeps the latest snapshot', 
   assert.deepEqual(mergeMessages(older, once), once)
   assert.deepEqual(once.map((item) => item.id), ['question', 'answer'])
   assert.equal(once[1].content, '最新正文')
+})
+
+test('execution phases match persisted queue and running states', async () => {
+  const { turnProgressText } = await import('../src/utils/chat.ts')
+  assert.match(turnProgressText('queued'), /等待模型/)
+  assert.match(turnProgressText('running'), /查询.*生成/)
+})
+
+test('pending persistence snapshot keeps stream open until saved done', async () => {
+  const frames = []
+  const data = new TextEncoder().encode(
+    'event: snapshot\ndata: {"type":"snapshot","status":"failed","persistence_pending":true}\n\n' +
+    'event: done\ndata: {"type":"done","status":"completed","persistence_pending":false}\n\n',
+  )
+  await consumeSSE(new ReadableStream({ start(controller) { controller.enqueue(data); controller.close() } }), (raw) => {
+    const event = JSON.parse(raw)
+    frames.push(event)
+    return event.type === 'done'
+  })
+  assert.equal(frames.length, 2)
+  assert.equal(frames[0].persistence_pending, true)
+  assert.equal(frames[1].status, 'completed')
 })

@@ -27,16 +27,13 @@ class Database:
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     @asynccontextmanager
-    async def transaction(self, address: str, *, snapshot: bool = False) -> AsyncIterator[AsyncSession]:
-        """每次操作独立会话；身份仅作用于事务，读快照避免多条 SELECT 观察不同提交状态。"""
+    async def transaction(self, user_id: str) -> AsyncIterator[AsyncSession]:
+        """每次操作独立会话；用户标识只在事务内生效，连接归池后不会串用户。"""
         async with self.sessions() as session:
             async with session.begin():
-                # 读快照必须在本事务第一条数据库语句之前设置隔离级别。
-                if snapshot:
-                    await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
                 # true 表示设置只持续到当前事务结束；连接归池后不携带上个用户身份。
                 await session.execute(
-                    text("SELECT set_config('app.current_user', :addr, true)"), {"addr": address.lower()}
+                    text("SELECT set_config('app.current_user', :addr, true)"), {"addr": user_id.lower()}
                 )
                 # 正常离开 begin 自动提交，异常自动回滚；调用方不要在此处执行长模型推理。
                 yield session

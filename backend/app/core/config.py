@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,30 +25,42 @@ class Settings(BaseSettings):
 
     # ── 应用 ──────────────────────────────────────────────
     environment: Literal["development", "test", "production"] = "development"
-    app_name: str = "Web3 AI Copilot"
     debug: bool = True
     api_prefix: str = "/api/v1"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # 运行账号只有业务表读写权；迁移账号负责 DDL，部署时两类凭据应分别提供。
     database_url: str = "postgresql+asyncpg://app_rw:copilot_dev_rw@127.0.0.1:54329/web3copilot"
+    foundation_database_url: str | None = None
+    agent_database_url: str | None = None
     database_migration_url: str = "postgresql+asyncpg://app_ddl:copilot_dev_ddl@127.0.0.1:54329/web3copilot"
-    # 摘要阈值使用估算；入模还会执行独立的保守字节上界检查，避免仅靠估算静默截断。
-    copilot_input_budget: int = Field(default=10000, ge=500, le=12000)
-    copilot_summary_trigger: int = Field(default=7000, ge=200)
-    copilot_recent_turns: int = Field(default=6, ge=1)
-    copilot_summary_rebuild_every: int = Field(default=5, ge=1)
     # 周期保存正文快照；结束/失败/取消另行立即保存，避免仅靠周期任务遗漏终态。
     copilot_snapshot_seconds: float = Field(default=1.0, gt=0)
 
-    # 对话与摘要共用 Ollama 原生接口。
-    copilot_ollama_url: str = "http://127.0.0.1:11434"
-    copilot_model: str = "qwen2.5:7b"
+    # 工厂选择提供方；云端模型窗口必须按部署明确配置，不能沿用本地默认值。
+    model_provider: Literal["ollama", "deepseek", "qwen"] = "ollama"
+    model_name: str = "qwen2.5:7b"
+    model_base_url: str = ""
+    # 云端模型独立显式代理；留空直连，不读取 HTTP_PROXY/HTTPS_PROXY。
+    model_proxy: str = Field(default="", repr=False)
+    model_api_key: SecretStr = SecretStr("")
+    deepseek_api_key: SecretStr = SecretStr("")
+    deepseek_model: str = "deepseek-chat"
+    deepseek_context_window: int = Field(default=65536, ge=4096)
+    qwen_api_key: SecretStr = SecretStr("")
+    qwen_model: str = "qwen-plus"
+    qwen_context_window: int = Field(default=32768, ge=4096)
+    model_context_window: int | None = Field(default=None, ge=4096)
+    model_output_tokens: int = Field(default=1024, ge=1)
+    model_context_reserve: int = Field(default=1024, ge=256)
+    # 本地默认串行；云端可按部署容量增加并发。
+    model_concurrency: int = Field(default=1, ge=1, le=32)
+    agent_model_call_limit: int = Field(default=3, ge=1, le=20)
+    agent_tool_call_limit: int = Field(default=4, ge=1, le=20)
+    chat_queue_limit: int = Field(default=16, ge=1)
+    chat_queue_timeout_seconds: float = Field(default=30, gt=0)
     copilot_timeout_seconds: float = Field(default=180, gt=0)
-    copilot_context_window: int = Field(default=16384, ge=4096)
-    copilot_output_tokens: int = Field(default=1024, ge=1)
-    copilot_summary_output_tokens: int = Field(default=1536, ge=1)
-    copilot_context_reserve: int = Field(default=1024, ge=512)
+    tool_timeout_seconds: float = Field(default=30, gt=0)
 
     # ── 链 ────────────────────────────────────────────────
     # 链本身的参数（chain_id / 原生币 / Multicall 地址 / 公共 RPC / 浏览器）
@@ -90,15 +102,19 @@ class Settings(BaseSettings):
     生成：`python -c "import secrets; print(secrets.token_urlsafe(48))"`
     HS256 要求密钥不短于 32 字节，短了 PyJWT 会告警。
     """
-    jwt_algorithm: Literal["HS256"] = "HS256"
-    jwt_expire_minutes: int = Field(default=60 * 24 * 7, gt=0)
-    """token 有效期。7 天：钱包登录不该频繁要求重签。"""
     nonce_ttl_seconds: int = Field(default=300, gt=0)
-    nonce_max_entries: int = Field(default=10000, gt=0)
     auth_rate_per_minute: int = Field(default=30, gt=0)
-    auth_rate_max_entries: int = Field(default=10000, gt=0)
     """nonce 有效期 5 分钟。签名是一次性动作，过期即作废。"""
     siwe_domain: str = "localhost:5173"
+    siwe_uri: str = "http://localhost:5173"
+    access_token_minutes: int = Field(default=15, ge=1, le=60)
+    login_session_days: int = Field(default=7, ge=1, le=30)
+    foundation_url: str = "http://127.0.0.1:8000"
+    conversation_ttl_hours: int = Field(default=720, ge=1)
+    request_limit_per_minute: int = Field(default=60, ge=1)
+    anonymous_limit_per_minute: int = Field(default=20, ge=1)
+    cache_max_entries: int = Field(default=256, ge=1)
+    agent_context_tokens: int = Field(default=8192, ge=2048)
     """写入签名消息的域名，让用户在钱包里看到「我在向谁授权」。"""
 
     # ── 质押 ──────────────────────────────────────────────
@@ -117,27 +133,18 @@ class Settings(BaseSettings):
     """质押年化缓存秒数。金库收益按批注入（初期每周 2~3 次），秒级刷新没意义。"""
 
     @model_validator(mode="after")
-    def validate_copilot_budget(self) -> Self:
-        """检查输入预算、最大输出预算和安全余量能否同时放入上下文窗口。
-
-        回答与摘要的输出上限不同，按较大值校验；这只是配置一致性检查，
-        每次真实请求仍需按实际消息执行模型适配器的长度检查。
-        """
-        available = self.copilot_context_window - self.copilot_context_reserve
-        if (
-            self.copilot_input_budget + max(self.copilot_output_tokens, self.copilot_summary_output_tokens)
-            > available
-        ):
-            raise ValueError("Copilot 输入、输出与安全余量之和不能超过模型窗口")
-        return self
-
-    @model_validator(mode="after")
     def validate_production(self) -> Self:
         """仅在 production 下检查独立凭据、日志模式、签名域名和明确的跨域来源。
 
         任一项不合格就拒绝启动；这里不建立数据库连接，也不检测外部服务是否在线。
         """
         if self.environment == "production":
+            if (
+                not self.foundation_database_url
+                or not self.agent_database_url
+                or self.foundation_database_url == self.agent_database_url
+            ):
+                raise ValueError("生产环境必须分别配置 FOUNDATION_DATABASE_URL 与 AGENT_DATABASE_URL")
             if "copilot_dev_rw" in self.database_url:
                 raise ValueError("生产环境必须配置独立 DATABASE_URL 凭据")
             if self.debug:

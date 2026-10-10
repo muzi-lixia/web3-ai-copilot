@@ -1,236 +1,45 @@
-import { Alert, Button, Card, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd'
-import { useQuery } from '@tanstack/react-query'
-
+import { useQueries, useQuery } from '@tanstack/react-query'
+import { Alert, Button, Input, Select, Table } from 'antd'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
+import { getChains, getPublicPrice } from '../api/resources'
 import { fetchMarketQuotes } from '../api/market'
-import type { MarketSource, TokenMarket } from '../types/api'
-
-/**
- * 金额格式化。
- *
- * 后端把金额序列化成**字符串**（防 float64 掉精度），这里为了排版才转成 number。
- * 价格与市值只用于显示、不参与记账，float64 的 15 位有效数字远超展示需要；
- * 真正要求精确的地方（余额、估值累加）不在这里算。
- */
-function toNumber(value: string | null): number | null {
-  if (value === null) return null
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
+import { formatUsd } from '../utils/format'
+import { useAuthStore } from '../stores/auth'
+import { PageHeading, Panel, Stat } from '../components/PageParts'
+/** 涨跌按原型使用涨红跌绿；金额只展示服务端字符串，不在前端记账或换汇。 */
+function Change({ value }: { value: number | string | null | undefined }) {
+  if (value === null || value === undefined) return <span className="muted">—</span>
+  const number = Number(value)
+  return <span className="mono" style={{ color: number > 0 ? '#F6465D' : number < 0 ? '#2EBD85' : '#98A7B8' }}>{number > 0 ? '+' : ''}{number.toFixed(2)}%</span>
 }
-
-/** 价格按量级选精度：$0.2244 和 $83,776.23 套用同一套小数位都不好看。 */
-function formatPrice(value: string): string {
-  const amount = toNumber(value)
-  if (amount === null) return value
-  if (amount === 0) return '$0'
-  if (amount >= 1000) return `$${amount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
-  if (amount >= 1) return `$${amount.toFixed(4)}`
-  // 小于 1 的币种用有效数字而不是固定小数位，否则 0.00001234 会显示成 $0.00
-  return `$${amount.toPrecision(4)}`
-}
-
-/** 市值/成交量动辄七八位数，缩写后一列放得下；完整值挂 Tooltip 备查。 */
-function formatCompact(value: string | null): string {
-  const amount = toNumber(value)
-  if (amount === null) return '—'
-  for (const { limit, suffix } of [
-    { limit: 1e12, suffix: 'T' },
-    { limit: 1e9, suffix: 'B' },
-    { limit: 1e6, suffix: 'M' },
-    { limit: 1e3, suffix: 'K' },
-  ]) {
-    if (amount >= limit) return `$${(amount / limit).toFixed(2)}${suffix}`
-  }
-  return `$${amount.toFixed(2)}`
-}
-
-/**
- * 24h 涨跌。
- *
- * 颜色按国内习惯**涨红跌绿**（与欧美相反）。用内联色值而非 antd 的
- * success/danger 语义色：后者的红绿含义跟着主题走，换个主题就可能被翻转，
- * 而"涨是红"在这个项目里是硬约定，不该由主题决定。
- */
-function Change24h({ value }: { value: number | null }) {
-  if (value === null) return <Typography.Text type="secondary">—</Typography.Text>
-  const color = value > 0 ? '#cf1322' : value < 0 ? '#3f8600' : '#8c8c8c'
-  return (
-    // tabular-nums 让数字等宽，一列数字才对得齐
-    <Typography.Text style={{ color, fontVariantNumeric: 'tabular-nums' }}>
-      {value > 0 ? '+' : ''}
-      {value.toFixed(2)}%
-    </Typography.Text>
-  )
-}
-
-const SOURCE_TAG: Record<MarketSource, { label: string; color: string; hint: string }> = {
-  dexscreener: {
-    label: 'DEX',
-    color: 'geek blue',
-    hint: 'DexScreener · 链上流动性池报价，价格/涨跌/市值/成交量齐全',
-  },
-  defillama: {
-    label: '聚合',
-    color: 'purple',
-    hint: 'DefiLlama · 只提供价格。该源没有涨跌与市值/成交量，故显示为 —',
-  },
-}
-
-/** 空值统一显示成破折号：显示成 0 会被误读为"市值真的是 0"。 */
-function Dash() {
-  return <Typography.Text type="secondary">—</Typography.Text>
-}
-
-/** Token 行情表。数据源：GET /markets/quotes */
 export default function Market() {
-  const { data, error, isFetching, refetch } = useQuery({
-    queryKey: ['market-quotes'],
-    queryFn: () => fetchMarketQuotes(),
-    // 后端缓存 60 秒，前端跟着同一个节奏轮询即可 —— 更密只是重复命中同一份缓存
-    refetchInterval: 60_000,
-  })
-
-  const tokens = data?.tokens ?? []
-  const stale = tokens.some((token) => token.stale)
-  const updatedAt = tokens.reduce<string | null>(
-    (latest, token) => (latest === null || token.updated_at > latest ? token.updated_at : latest),
-    null,
-  )
-
-  const columns = [
-    {
-      title: 'Token',
-      dataIndex: 'symbol',
-      render: (symbol: string, token: TokenMarket) => {
-        const tag = SOURCE_TAG[token.source]
-        return (
-          <Space size={8}>
-            <Typography.Text strong>{symbol}</Typography.Text>
-            <Tooltip title={tag.hint}>
-              <Tag color={tag.color} style={{ marginInlineEnd: 0 }}>
-                {tag.label}
-              </Tag>
-            </Tooltip>
-          </Space>
-        )
-      },
-    },
-    {
-      title: '价格',
-      dataIndex: 'price_usd',
-      align: 'right' as const,
-      render: (price: string) => (
-        <Typography.Text style={{ fontVariantNumeric: 'tabular-nums' }}>
-          {formatPrice(price)}
-        </Typography.Text>
-      ),
-      width: 160,
-    },
-    {
-      title: '24h 涨跌',
-      dataIndex: 'change_24h',
-      align: 'right' as const,
-      render: (value: number | null) => <Change24h value={value} />,
-      width: 130,
-    },
-    {
-      title: '市值',
-      dataIndex: 'market_cap',
-      align: 'right' as const,
-      render: (value: string | null) =>
-        value === null ? (
-          <Dash />
-        ) : (
-          <Tooltip title={`$${value}`}>
-            <Typography.Text style={{ fontVariantNumeric: 'tabular-nums' }}>
-              {formatCompact(value)}
-            </Typography.Text>
-          </Tooltip>
-        ),
-      width: 140,
-    },
-    {
-      title: '24h 成交量',
-      dataIndex: 'volume_24h',
-      align: 'right' as const,
-      render: (value: string | null) =>
-        value === null ? (
-          <Dash />
-        ) : (
-          <Tooltip title={`$${value}`}>
-            <Typography.Text style={{ fontVariantNumeric: 'tabular-nums' }}>
-              {formatCompact(value)}
-            </Typography.Text>
-          </Tooltip>
-        ),
-      width: 150,
-    },
-  ]
-
-  return (
-    <Card
-      title={
-        <Space size={12}>
-          <span>Token 行情</span>
-          {data && <Tag color="green">{data.chain_name}</Tag>}
-        </Space>
-      }
-      extra={
-        <Button size="small" onClick={() => refetch()} loading={isFetching}>
-          刷新
-        </Button>
-      }
-    >
-      <Typography.Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 16 }}>
-        价格来自链上流动性池与聚合行情，不是交易所实时盘口。后端缓存 60 秒
-        {updatedAt && <>，本批数据更新于 {new Date(updatedAt).toLocaleTimeString()}</>}。
-      </Typography.Paragraph>
-
-      {error && (
-        <Alert
-          type="error"
-          showIcon
-          style={{ marginBottom: 16 }}
-          title="读取行情失败"
-          description={error instanceof Error ? error.message : String(error)}
-        />
-      )}
-
-      {stale && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 16 }}
-          title="行情源暂时不可用，当前显示的是过期缓存"
-          description="价格可能已经变动。恢复后会自动刷新。"
-        />
-      )}
-
-      {data && data.missing.length > 0 && (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          title={`${data.missing.length} 个 symbol 没有行情：${data.missing.join('、')}`}
-          description="所有行情源上都查不到它的报价（例如没有交易池的 BVT），也可能是拼写不在候选清单里。这是市场事实，不是取数失败 —— 所以单独列出，而不是当成价格为 0。"
-        />
-      )}
-
-      <Table
-        rowKey="symbol"
-        size="small"
-        columns={columns}
-        dataSource={tokens}
-        loading={isFetching && !data}
-        pagination={false}
-        locale={{
-          emptyText: (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={error ? '数据不可用' : '暂无行情'}
-            />
-          ),
-        }}
-      />
-    </Card>
-  )
+  const token = useAuthStore(s => s.token)
+  const [chainId, setChainId] = useState<number | undefined>()
+  const [symbol, setSymbol] = useState('')
+  const [currency, setCurrency] = useState('USD')
+  const chains = useQuery({ queryKey: ['chains'], queryFn: getChains })
+  const quotes = useQuery({ queryKey: ['market-quotes', chainId], queryFn: () => fetchMarketQuotes({ chainId }), refetchInterval: 60000 })
+  const tokens = quotes.data?.tokens ?? []
+  // 七日变化和 CNY 均由单币接口提供，缓存按网络、币种、币种单位分开。
+  const details = useQueries({ queries: tokens.map(t => ({ queryKey: ['public-price', quotes.data!.chain_id, t.symbol, currency],
+    queryFn: () => getPublicPrice(quotes.data!.chain_id, t.symbol, currency), staleTime: 60000, retry: false })) })
+  const rows = tokens.map((t, i) => ({ ...t, detail: details[i]?.data, detailLoading: details[i]?.isFetching, detailError: details[i]?.error }))
+    .filter(t => t.symbol.toLowerCase().includes(symbol.trim().toLowerCase()))
+  const sources = [...new Set(tokens.map(t => t.source))].join(' · ')
+  async function refresh() { await quotes.refetch(); await Promise.all(details.map(d => d.refetch())) }
+  return <><PageHeading title="行情" description="基础服务公开数据 · 允许匿名访问，无需凭证" extra={<span className="chip">涨 <span style={{ color: '#F6465D' }}>红</span> / 跌 <span style={{ color: '#2EBD85' }}>绿</span></span>} />
+    {!token && <div className="anon-bar"><span>当前为匿名浏览。行情是公开数据；本人余额和对话需要连接钱包。</span><Link to="/login"><Button size="small">连接钱包</Button></Link></div>}
+    <div className="proto-grid three-cols" style={{ marginBottom: 14 }}><Stat value="—" label="全市场总市值（未接入）" /><Stat value="—" label="全市场 24h 交易量（未接入）" /><Stat value={<span style={{ fontSize: 13 }}>{sources || '等待报价'}</span>} label="当前列表实际数据来源" /></div>
+    <div className="filters"><Select aria-label="行情网络" allowClear value={chainId} placeholder="默认网络" onChange={setChainId} style={{ width: 180 }} options={chains.data?.map(c => ({ value: c.chain_id, label: c.name }))} /><Input aria-label="行情币种筛选" placeholder="筛选币种" value={symbol} onChange={e => setSymbol(e.target.value)} style={{ width: 220 }} /><Select aria-label="行情计价单位" value={currency} onChange={setCurrency} options={[{ value: 'USD' }, { value: 'CNY' }]} /><Button loading={quotes.isFetching || details.some(d => d.isFetching)} onClick={() => void refresh()}>刷新</Button></div>
+    {quotes.error && <Alert type="error" showIcon title={quotes.error instanceof Error ? quotes.error.message : '行情查询失败'} style={{ marginBottom: 14 }} />}
+    <Panel title="行情列表" sub={quotes.data?.chain_name ?? '正在读取网络'}><Table size="small" pagination={false} dataSource={rows} loading={quotes.isFetching && !quotes.data} rowKey="symbol" scroll={{ x: 'max-content' }} columns={[
+      { title: '代币', dataIndex: 'symbol', render: v => <div className="coin"><span className="cicon">{v.slice(0, 4)}</span>{v}</div> },
+      { title: `价格 ${currency}`, align: 'right', render: (_, row) => <span className="mono">{currency === 'USD' ? formatUsd(row.price_usd) : row.detail?.price ?? '—'}</span> },
+      { title: '24h', align: 'right', render: (_, row) => <Change value={row.change_24h} /> },
+      { title: '7d', align: 'right', render: (_, row) => row.detailLoading ? <span className="muted">读取中</span> : <Change value={row.detail?.change_7d} /> },
+      { title: `市值 ${currency}`, align: 'right', render: (_, row) => currency === 'USD' ? formatUsd(row.market_cap) : row.detail?.market_cap ?? '—' },
+      { title: `24h 交易量 ${currency}`, align: 'right', render: (_, row) => currency === 'USD' ? formatUsd(row.volume_24h) : row.detail?.volume_24h ?? '—' },
+      { title: '来源 / 状态', render: (_, row) => <div>{row.source}<div className="market-row-meta">{row.detailError ? '详细行情暂不可用' : row.stale ? '过期缓存' : new Date(row.updated_at).toLocaleTimeString()}{row.detail?.exchange_rate_date && ` · 汇率 ${row.detail.exchange_rate_date}`}</div></div> },
+    ]} />{!!quotes.data?.missing.length && <div className="unpriced"><strong>暂无报价：{quotes.data.missing.join('、')}</strong><p>未取得报价不代表价格为零。</p></div>}<div className="legend"><span>缺失价格或统计字段显示为 —，不猜测数值</span><span>报价来源、更新时间和过期缓存状态按实际响应展示</span></div></Panel></>
 }

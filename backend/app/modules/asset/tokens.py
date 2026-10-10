@@ -20,7 +20,7 @@ EVM 只能回答「地址 X 在合约 Y 上的余额是多少」，无法枚举�
 from dataclasses import dataclass
 from typing import Literal
 
-from app.core.exceptions import UnsupportedChainError
+from app.core.exceptions import NotFoundError, UnsupportedChainError
 from app.infrastructure.blockchain.chains import BERACHAIN
 
 RiskClass = Literal["stable", "volatile"]
@@ -176,3 +176,49 @@ def risk_class_of(chain_id: int, symbol: str) -> RiskClass:
         if token.symbol == symbol:
             return token.risk_class
     return "volatile"
+
+
+def select_tokens(chain_id: int, symbols: tuple[str, ...] | None = None) -> tuple[TokenMeta, ...]:
+    """精确按符号选择读取对象，BERA 与 WBERA 不能用包含关系匹配。
+
+    None 表示候选清单；明确指定但不支持的币种返回错误，不退回全部资产或零余额。
+    普通 API 与 Agent 可复用该选择能力，不引入任何模型/工具框架依赖。
+    """
+    tokens = tokens_for(chain_id)
+    if symbols is None:
+        return tokens
+    wanted = tuple(dict.fromkeys(symbol.strip().upper() for symbol in symbols))
+    by_symbol = {token.symbol.upper(): token for token in tokens}
+    missing = [symbol for symbol in wanted if symbol not in by_symbol]
+    if not wanted or missing:
+        raise NotFoundError("当前网络未支持查询币种：" + ", ".join(missing or ["空币种列表"]))
+    return tuple(by_symbol[symbol] for symbol in wanted)
+
+
+# 新网络首期覆盖原生币与主流稳定币，范围显式登记，不宣称自动发现全部资产。
+# 原生币估价使用包装币报价；支持链不等于已核验所有公共 RPC 的生产 SLA。
+TOKENS_BY_CHAIN.update(
+    {
+        1: (
+            TokenMeta("ETH", None, 18, price_address="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+            TokenMeta("USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6, risk_class="stable"),
+            TokenMeta("USDT", "0xdAC17F958D2ee523a2206206994597C13D831ec7", 6, risk_class="stable"),
+        ),
+        56: (
+            TokenMeta("BNB", None, 18, price_address="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
+            TokenMeta("USDT", "0x55d398326f99059fF775485246999027B3197955", 18, risk_class="stable"),
+        ),
+        137: (
+            TokenMeta("POL", None, 18, price_address="0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"),
+            TokenMeta("USDC", "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", 6, risk_class="stable"),
+        ),
+        42161: (
+            TokenMeta("ETH", None, 18, price_address="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+            TokenMeta("USDC", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", 6, risk_class="stable"),
+        ),
+        8453: (
+            TokenMeta("ETH", None, 18, price_address="0x4200000000000000000000000000000000000006"),
+            TokenMeta("USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6, risk_class="stable"),
+        ),
+    }
+)

@@ -11,7 +11,7 @@ import type { ApiResponse, StakingSummary } from '../types/api'
  * 用来解释 `portfolio_ratio` 的分母。它与资产接口用的是同一个后端口径，
  * 所以前端不要再自己拿两个接口的数相除 —— 那会变成第二份定义。
  */
-export async function fetchStakingPositions(address: string): Promise<StakingSummary> {
-  const { data } = await http.get<ApiResponse<StakingSummary>>(`/wallets/${address}/staking-positions`)
+export async function fetchStakingPositions(): Promise<StakingSummary> {
+  const { data } = await http.get<ApiResponse<StakingSummary>>('/me/staking-positions')
   return data.data
 }

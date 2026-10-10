@@ -1,7 +1,5 @@
 """HTTP 成功与错误均采用项目 code/msg/data 格式，保留真实状态码。"""
 
-from http import HTTPStatus
-
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -19,7 +17,7 @@ ERROR_CODES = {
     "unsupported_chain": 40002,
     "nonce_invalid": 40003,
     "unauthorized": 40101,
-    "signature_invalid": 40102,
+    "access_expired": 40103,
     "forbidden": 40301,
     "not_found": 40401,
     "method_not_allowed": 40501,
@@ -33,7 +31,6 @@ ERROR_CODES = {
     "model_empty_response": 50203,
     "model_stream_interrupted": 50204,
     "model_timeout": 50205,
-    "summary_failed": 50206,
     "chat_unavailable": 50301,
 }
 
@@ -57,7 +54,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(request: Request, exc: AppError):
         """业务异常保留明确状态码和公开说明。"""
-        logger.warning("AppError [%s] %s", exc.code, exc.message)
+        logger.warning("http.business_error", extra={"error_code": exc.code})
         return error_response(exc.status_code, exc.code, exc.message)
 
     @app.exception_handler(RequestValidationError)
@@ -80,27 +77,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception):
         """内部异常记堆栈，对外仅返回安全的通用说明。"""
-        logger.exception("Unhandled exception")
+        logger.exception("http.internal_error")
         return error_response(500, "internal_error", "服务内部错误")
-
-
-def error_responses() -> dict:
-    """OpenAPI 声明实际错误媒体类型和字段，避免文档仍展示 FastAPI 默认 detail 数组。"""
-    schema = {
-        "type": "object",
-        "required": ["code", "msg", "data"],
-        "properties": {
-            "code": {"type": "integer", "minimum": 1},
-            "msg": {"type": "string"},
-            "data": {"anyOf": [{"type": "null"}, {"type": "object"}]},
-        },
-    }
-    responses = {
-        status: {
-            "description": HTTPStatus(status).phrase,
-            "content": {"application/json": {"schema": schema}},
-        }
-        for status in (400, 401, 403, 404, 405, 409, 422, 429, 500, 502, 503)
-    }
-    responses[401]["headers"] = {"WWW-Authenticate": {"schema": {"type": "string"}, "description": "Bearer"}}
-    return responses

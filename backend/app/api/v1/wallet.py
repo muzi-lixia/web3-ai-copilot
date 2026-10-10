@@ -1,41 +1,29 @@
-"""钱包资产路由（功能点 1）。
-
-    GET /wallets/{address}/assets?chain_id=80094
-
-地址写在路径里（而不是从 token 里取），是为了给后续"看别人的地址"留位置：
-服务端已经有能力查任意地址，限制只在这一行的权限判断上。
-"""
+"""当前用户业务接口：查询目标只能来自有效登录凭证，禁止客户端填写地址。"""
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.dependencies import get_current_address
+from app.api.dependencies import BusinessResourcesDep, get_current_address
 from app.api.responses import success
-from app.common.schemas import Address, ApiResponse
-from app.core.config import settings
-from app.core.exceptions import ForbiddenError
+from app.common.schemas import ApiResponse
 from app.modules.asset import service as asset_service
 from app.modules.asset.schemas import WalletAssets
 
-router = APIRouter(prefix="/wallets", tags=["wallet"])
+router = APIRouter(prefix="/me", tags=["资产查询"])
 
 
-@router.get("/{address}/assets", response_model=ApiResponse[WalletAssets], summary="查询钱包资产")
+@router.get("/assets", response_model=ApiResponse[WalletAssets], summary="查询钱包资产")
 async def get_assets(
-    address: Address,
+    resources: BusinessResourcesDep,
     chain_id: int | None = Query(default=None, gt=0, description="不传则用默认链（见配置 default_chain_id）"),
     current_address: str = Depends(get_current_address),
 ) -> dict:
-    """查询指定地址在某条链上的原生币与 ERC-20 余额，并附 USD 估值。
+    """查询当前登录钱包的原生币和已收录 ERC20 余额，并附 USD 估值。
 
-    两条约束：
-
-    1. **只能查自己。** token 里已经带了地址，路径上的 address 必须与之一致，
-       否则就是拿别人的凭证读第三个地址。想放开成"查询任意地址"时，
-       只需改这一处判断。
-    2. **阻塞调用不出现在这一层。** 链上读取是同步的，已经由 service 层丢进
-       线程池；路由只做权限判断和参数归一。
+    钱包身份由鉴权依赖注入，不接收外部地址。业务服务负责链上读取和估值；
+    本路由只接收网络选择并返回统一响应，不包含模型或工具逻辑。
     """
-    if address.lower() != current_address.lower():
-        raise ForbiddenError("只能查询当前登录钱包的资产")
-
-    return success(await asset_service.get_wallet_assets(chain_id or settings.default_chain_id, address))
+    return success(
+        await asset_service.get_wallet_assets(
+            chain_id or resources.settings.default_chain_id, current_address, resources=resources
+        )
+    )

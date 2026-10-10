@@ -35,6 +35,7 @@ from app.common.singleflight import singleflight
 from app.common.units import monetary_calculation, to_human
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
+from app.core.resources import BusinessResources
 from app.infrastructure.blockchain import client as chain_service
 from app.infrastructure.blockchain import staking_vault
 from app.infrastructure.blockchain.chains import ChainMeta, get_chain
@@ -91,7 +92,9 @@ class _Positions:
     issues: list[DataIssue] = field(default_factory=list)
 
 
-async def get_summary(chain_id: int, owner: str) -> StakingSummary:
+async def get_summary(
+    chain_id: int, owner: str, *, resources: BusinessResources | None = None
+) -> StakingSummary:
     """质押页入口：仓位 + 年化 + 收益 + 质押占比。"""
     chain = get_chain(chain_id)
     address = to_checksum(owner)
@@ -99,8 +102,8 @@ async def get_summary(chain_id: int, owner: str) -> StakingSummary:
 
     # 占比的分母需要资产侧，所以这里是唯一会读资产的地方。
     built, liquid = await asyncio.gather(
-        _build_positions(chain_id, address, now),
-        _load_liquid_value(chain_id, address),
+        _build_positions(chain_id, address, now, resources=resources),
+        _load_liquid_value(chain_id, address, resources=resources),
     )
 
     return StakingSummary(
@@ -128,7 +131,9 @@ async def get_summary(chain_id: int, owner: str) -> StakingSummary:
     )
 
 
-async def get_staked_slices(chain_id: int, owner: str) -> tuple[StakedSlice, ...] | None:
+async def get_staked_slices(
+    chain_id: int, owner: str, *, resources: BusinessResources | None = None
+) -> tuple[StakedSlice, ...] | None:
     """风险报告入口：把仓位折成风险口径的几行。
 
     返回 `None` 表示**不可知**（有仓位却取不到价），与返回空元组（测出来是零）
@@ -138,7 +143,9 @@ async def get_staked_slices(chain_id: int, owner: str) -> tuple[StakedSlice, ...
     # UnsupportedChainError(400)，这是「不支持的链」与「这条链没有质押模块」
     # 两种情况的唯一区分点。别把它当无用代码删掉 —— 删了就变成静默返回空元组。
     get_chain(chain_id)
-    built = await _build_positions(chain_id, to_checksum(owner), datetime.now(UTC), with_earnings=False)
+    built = await _build_positions(
+        chain_id, to_checksum(owner), datetime.now(UTC), with_earnings=False, resources=resources
+    )
 
     if built.issues or built.missing_price:
         # 有仓位但一个价都取不到：此时 staked_value_usd 恒为 0，
@@ -158,7 +165,12 @@ async def get_staked_slices(chain_id: int, owner: str) -> tuple[StakedSlice, ...
 
 @monetary_calculation
 async def _build_positions(
-    chain_id: int, address: str, now: datetime, *, with_earnings: bool = True
+    chain_id: int,
+    address: str,
+    now: datetime,
+    *,
+    with_earnings: bool = True,
+    resources: BusinessResources | None = None,
 ) -> _Positions:
     """读链上 + 取行情/年化/收益，组装出仓位表。"""
     chain = get_chain(chain_id)
@@ -169,10 +181,10 @@ async def _build_positions(
 
     # 仓位是主体；行情、年化和收益均独立降级。风险入口跳过不需要的 Beep 查询。
     readings, quotes, apy, earnings = await asyncio.gather(
-        _load_readings(chain_id, address),
-        _load_quotes(chain, modules),
-        beep.get_stake_apy_safe() if with_earnings else asyncio.sleep(0, result=None),
-        beep.gather_earnings([module.vault for module in modules], address)
+        _load_readings(chain_id, address, resources=resources),
+        _load_quotes(chain, modules, resources=resources),
+        beep.get_stake_apy_safe(resources=resources) if with_earnings else asyncio.sleep(0, result=None),
+        beep.gather_earnings([module.vault for module in modules], address, resources=resources)
         if with_earnings
         else asyncio.sleep(0, result={}),
     )
@@ -278,7 +290,11 @@ def _to_pending(
 
 
 def _read_positions(
-    chain: ChainMeta, modules: tuple[StakingModule, ...], address: str
+    chain: ChainMeta,
+    modules: tuple[StakingModule, ...],
+    address: str,
+    *,
+    resources: BusinessResources | None = None,
 ) -> dict[str, staking_vault.VaultReading]:
     """读该链上全部质押模块（同步阻塞，由调用方丢线程池）。
 
@@ -292,7 +308,9 @@ def _read_positions(
     for module in modules:
         try:
             out[module.key] = chain_service.read_with_failover(
-                chain, lambda w3, module=module: staking_vault.read_vault(w3, chain, module, address)
+                chain,
+                lambda w3, module=module: staking_vault.read_vault(w3, chain, module, address),
+                resources=resources,
             )
         except Exception as exc:  # noqa: BLE001 —— 合约异常类型很多，逐个记录后继续
             failures.append(f"{module.key} ({type(exc).__name__})")
@@ -367,21 +385,25 @@ def _ratio(staked: Decimal, liquid: Decimal | None) -> float | None:
     return float((staked / total).quantize(_RATIO_PLACES, rounding=ROUND_HALF_UP))
 
 
-async def _load_quotes(chain: ChainMeta, modules: tuple[StakingModule, ...]) -> dict[str, TokenMarket]:
+async def _load_quotes(
+    chain: ChainMeta, modules: tuple[StakingModule, ...], *, resources: BusinessResources | None = None
+) -> dict[str, TokenMarket]:
     """取底层资产行情。失败返回空表，**不向上抛**（行情是注解层）。"""
     symbols = sorted({module.underlying_symbol for module in modules})
     try:
-        result = await market_service.get_quotes(chain.chain_id, symbols)
+        result = await market_service.get_quotes(chain.chain_id, symbols, resources=resources)
     except UpstreamError as exc:
         logger.warning("底层资产行情不可用，本次只返回数量：%s", exc)
         return {}
     return {quote.symbol: quote for quote in result.tokens}
 
 
-async def _load_liquid_value(chain_id: int, address: str) -> Decimal | None:
+async def _load_liquid_value(
+    chain_id: int, address: str, *, resources: BusinessResources | None = None
+) -> Decimal | None:
     """取未质押资产的价值合计（占比分母的另一半）。失败返回 None。"""
     try:
-        wallet = await asset_service.get_wallet_assets(chain_id, address)
+        wallet = await asset_service.get_wallet_assets(chain_id, address, resources=resources)
     except UpstreamError as exc:
         logger.warning("资产侧不可用，本次不给出质押占比：%s", exc)
         return None
@@ -391,9 +413,11 @@ async def _load_liquid_value(chain_id: int, address: str) -> Decimal | None:
 
 
 @singleflight
-async def _load_readings(chain_id: int, address: str):
+async def _load_readings(chain_id: int, address: str, *, resources: BusinessResources | None = None):
     """把阻塞的多金库链上读取放入线程池，相同链和地址的并发调用由 singleflight 合并。
 
     不缓存已完成结果；页内仓位汇总和风险分析同时查询时共享一次在途读取。
     """
-    return await run_in_threadpool(_read_positions, get_chain(chain_id), modules_for(chain_id), address)
+    return await run_in_threadpool(
+        lambda: _read_positions(get_chain(chain_id), modules_for(chain_id), address, resources=resources)
+    )

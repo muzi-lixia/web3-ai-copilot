@@ -77,12 +77,6 @@ BERACHAIN = ChainMeta(
 )
 
 
-CHAINS: tuple[ChainMeta, ...] = (BERACHAIN,)
-
-BY_ID: dict[int, ChainMeta] = {c.chain_id: c for c in CHAINS}
-BY_KEY: dict[str, ChainMeta] = {c.key: c for c in CHAINS}
-
-
 def get_chain(chain_id: int) -> ChainMeta:
     """按 chain_id 取链配置。未登记抛 UnsupportedChainError。
 
@@ -94,3 +88,42 @@ def get_chain(chain_id: int) -> ChainMeta:
         supported = ", ".join(f"{c.key}({c.chain_id})" for c in CHAINS)
         raise UnsupportedChainError(f"暂不支持的链 {chain_id}，当前可用：{supported}")
     return chain
+
+
+# 保留既有 Berachain 业务配置，追加需求中的五条 EVM 网络。生产节点走 RPC_OVERRIDES。
+# 公共节点仅作开发默认；所有 RPC 调用会校验实际 chain_id，不能靠 URL 名称判断网络。
+def _evm(key, cid, name, urls, explorer, dex, llama):
+    return ChainMeta(key, cid, name, BERACHAIN.multicall3, urls, explorer, dex, llama)
+
+
+ETHEREUM = _evm(
+    "ethereum",
+    1,
+    "Ethereum",
+    ("https://ethereum-rpc.publicnode.com",),
+    "https://etherscan.io",
+    "ethereum",
+    "ethereum",
+)
+BSC = _evm("bsc", 56, "BSC", ("https://bsc-dataseed.bnbchain.org",), "https://bscscan.com", "bsc", "bsc")
+POLYGON = _evm(
+    "polygon",
+    137,
+    "Polygon",
+    ("https://polygon-bor-rpc.publicnode.com",),
+    "https://polygonscan.com",
+    "polygon",
+    "polygon",
+)
+ARBITRUM = _evm(
+    "arbitrum",
+    42161,
+    "Arbitrum",
+    ("https://arb1.arbitrum.io/rpc",),
+    "https://arbiscan.io",
+    "arbitrum",
+    "arbitrum",
+)
+BASE = _evm("base", 8453, "Base", ("https://mainnet.base.org",), "https://basescan.org", "base", "base")
+CHAINS = (BERACHAIN, ETHEREUM, BSC, POLYGON, ARBITRUM, BASE)
+BY_ID = {c.chain_id: c for c in CHAINS}

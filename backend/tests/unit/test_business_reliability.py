@@ -17,6 +17,7 @@ from app.common.singleflight import singleflight
 from app.common.units import to_human
 from app.core.config import settings
 from app.core.exceptions import UpstreamError
+from app.core.resources import default_resources
 from app.infrastructure.blockchain import client as chain
 from app.infrastructure.blockchain import staking_vault
 from app.infrastructure.blockchain.chains import BERACHAIN
@@ -72,7 +73,7 @@ def test_unread_balance_is_not_zero(monkeypatch):
 
 async def test_wallet_response_propagates_missing_balance(monkeypatch):
     asset = _wallet(("WBERA", "1")).assets[0].model_copy(update={"amount": None})
-    monkeypatch.setattr(asset_service, "_read_holdings", lambda *args: [asset])
+    monkeypatch.setattr(asset_service, "_read_holdings", lambda *args, **kwargs: [asset])
     monkeypatch.setattr(asset_service, "_load_quotes", AsyncMock(return_value={"WBERA": quote()}))
     result = await asset_service.get_wallet_assets(80094, "0x" + "1" * 40)
     assert result.status == "partial"
@@ -196,8 +197,8 @@ def test_fdv_is_not_market_cap_and_nonfinite_is_rejected():
 
 async def test_stale_cache_has_a_hard_expiry(monkeypatch):
     monkeypatch.setattr(
-        market_service,
-        "_cache",
+        default_resources(),
+        "market_cache",
         {80094: (time.monotonic() - settings.market_max_stale_seconds - 1, {"WBERA": quote()})},
     )
     monkeypatch.setattr(market_service, "_fetch", AsyncMock(side_effect=UpstreamError("offline")))
@@ -206,15 +207,19 @@ async def test_stale_cache_has_a_hard_expiry(monkeypatch):
 
 
 async def test_recent_stale_cache_remains_explicit(monkeypatch):
-    monkeypatch.setattr(market_service, "_cache", {80094: (time.monotonic() - 1, {"WBERA": quote()})})
+    monkeypatch.setattr(
+        default_resources(), "market_cache", {80094: (time.monotonic() - 1, {"WBERA": quote()})}
+    )
     monkeypatch.setattr(market_service, "_fetch", AsyncMock(side_effect=UpstreamError("offline")))
     result = await market_service._load(BERACHAIN)
     assert result["WBERA"].stale
 
 
 def test_rpc_failover_retries_transport_but_not_contract_errors(monkeypatch):
-    monkeypatch.setattr(chain, "_candidate_urls", lambda _: ["https://a/secret", "https://b/secret"])
-    monkeypatch.setattr(chain, "_good_rpc", {})
+    monkeypatch.setattr(
+        chain, "_candidate_urls", lambda _, **kwargs: ["https://a/secret", "https://b/secret"]
+    )
+    monkeypatch.setattr(default_resources(), "good_rpc", {})
     factory = Mock(return_value=SimpleNamespace(eth=SimpleNamespace(chain_id=80094)))
     factory.HTTPProvider = Mock()
     monkeypatch.setattr(chain, "Web3", factory)
@@ -230,7 +235,7 @@ def test_rpc_failover_retries_transport_but_not_contract_errors(monkeypatch):
 
 def test_rpc_credentials_not_exposed(monkeypatch, caplog):
     secret = "DO_NOT_EXPOSE_THIS_KEY"
-    monkeypatch.setattr(chain, "_candidate_urls", lambda _: [f"https://user:pass@rpc/{secret}"])
+    monkeypatch.setattr(chain, "_candidate_urls", lambda _, **kwargs: [f"https://user:pass@rpc/{secret}"])
     factory = Mock(side_effect=Timeout(secret))
     factory.HTTPProvider = Mock()
     monkeypatch.setattr(chain, "Web3", factory)
@@ -276,7 +281,7 @@ async def test_old_observation_cannot_be_refreshed_by_cache_timestamp(monkeypatc
             - timedelta(seconds=settings.market_cache_ttl + settings.market_max_stale_seconds + 1)
         }
     )
-    monkeypatch.setattr(market_service, "_cache", {80094: (time.monotonic() + 60, {"WBERA": old})})
+    monkeypatch.setattr(default_resources(), "market_cache", {80094: (time.monotonic() + 60, {"WBERA": old})})
     assert await market_service._load(BERACHAIN) == {}
 
 
@@ -360,7 +365,7 @@ def test_unreadable_underlying_address_is_not_used_for_valuation(result):
 @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
 async def test_nonfinite_apy_degrades_instead_of_breaking_json(monkeypatch, value):
     """非法年化拒绝解析，注解层安全入口降级 None，不让 JSON 序列化变成 500。"""
-    monkeypatch.setattr(staking_service.beep, "_apy_cache", {})
+    monkeypatch.setattr(default_resources(), "apy_cache", {})
     monkeypatch.setattr(staking_service.beep, "_get", AsyncMock(return_value={"apy": value}))
     assert await staking_service.beep.get_stake_apy_safe() is None
 
@@ -369,3 +374,60 @@ def test_unknown_underlying_cannot_borrow_declared_asset_decimals():
     """链上实际底层未登记时拒绝，不能按另一个币的精度和报价构造估值。"""
     with pytest.raises(UpstreamError, match="未登记"):
         staking_service._resolve_underlying(80094, modules_for(80094)[0], "0x" + "9" * 40)
+
+
+async def test_bera_only_reads_native_balance_without_market_or_erc20(monkeypatch):
+    """BERA 余额查询在业务层收窄 RPC，不是查询全部资产后前端过滤。"""
+    calls = []
+
+    def native(*args):
+        calls.append(args)
+        return 123456789012345678901
+
+    def forbidden(*args):
+        pytest.fail("查询原生币余额不能读取 ERC-20 或行情")
+
+    monkeypatch.setattr(chain, "read_native_balance", native)
+    monkeypatch.setattr(chain, "read_erc20_balances", forbidden)
+    monkeypatch.setattr(
+        chain,
+        "read_with_failover",
+        lambda meta, operation, **kwargs: operation(SimpleNamespace(eth=SimpleNamespace(block_number=123))),
+    )
+    monkeypatch.setattr(asset_service, "_load_quotes", forbidden)
+    wallet = await asset_service.get_wallet_assets(80094, "0x" + "3" * 40, ("BERA",), False)
+    assert len(calls) == 1 and calls[0][-1] == 123
+    assert [asset.symbol for asset in wallet.assets] == ["BERA"]
+    assert format(wallet.assets[0].amount, "f") == "123.456789012345678901"
+    assert wallet.status == "complete" and not wallet.missing_price and not wallet.issues
+
+
+async def test_wbera_only_reads_its_contract_and_not_native(monkeypatch):
+    def forbidden(*args):
+        pytest.fail("WBERA 不能读取原生 BERA 余额")
+
+    seen = []
+
+    def erc20(w3, meta, tokens, owner, block):
+        seen.append(tokens)
+        assert [token.symbol for token in tokens] == ["WBERA"]
+        return {tokens[0].address.lower(): 42 * 10**18}
+
+    monkeypatch.setattr(chain, "read_native_balance", forbidden)
+    monkeypatch.setattr(chain, "read_erc20_balances", erc20)
+    wallet = asset_service._read_holdings_on_node(
+        SimpleNamespace(eth=SimpleNamespace(block_number=123)), BERACHAIN, "0x" + "3" * 40, ("WBERA",)
+    )
+    assert len(seen) == 1 and wallet[0].amount == 42
+
+
+async def test_unsupported_symbol_does_not_query_or_return_zero(monkeypatch):
+    from app.core.exceptions import NotFoundError
+
+    def forbidden(*args):
+        pytest.fail("不支持币种应在读取前拒绝")
+
+    monkeypatch.setattr(asset_service, "_read_holdings", forbidden)
+    monkeypatch.setattr(asset_service, "_load_quotes", forbidden)
+    with pytest.raises(NotFoundError, match="UNKNOWN"):
+        await asset_service.get_wallet_assets(80094, "0x" + "3" * 40, ("UNKNOWN",), False)

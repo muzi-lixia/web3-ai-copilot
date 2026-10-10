@@ -1,100 +1,32 @@
-import { Alert, Button, Card, Steps, Typography } from 'antd'
-import { useEffect, useMemo } from 'react'
+import { Alert, Button } from 'antd'
+import { useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-
-import { type LoginStage, useWalletLogin } from '../hooks/useWalletLogin'
+import { useWalletLogin } from '../hooks/useWalletLogin'
 import { useAuthStore } from '../stores/auth'
+import { Note } from '../components/PageParts'
 import { shorten } from '../utils/format'
-
-/** 三个阶段在 Steps 里的顺序。idle / done 不在流程中间，不占步骤位。 */
-const STEP_ORDER: LoginStage[] = ['nonce', 'signing', 'verifying']
-
-const STEP_LABEL: Record<string, string> = {
-  nonce: '获取消息',
-  signing: '签名确认',
-  verifying: '验证身份',
-}
-
 export default function Login() {
-  const { login, stage, stageText, error, busy, isConnected, address, isConnecting } =
-    useWalletLogin()
-  const token = useAuthStore((state) => state.token)
+  const wallet = useWalletLogin()
+  const auth = useAuthStore()
   const navigate = useNavigate()
   const location = useLocation()
-
-  /** 被守卫拦下来的原目标地址，登录后送回去。 */
-  const from = (location.state as { from?: string } | null)?.from ?? '/dashboard'
-
-  useEffect(() => {
-    if (token) {
-      navigate(from, { replace: true })
-    }
-  }, [token, from, navigate])
-
-  const currentStep = useMemo(() => STEP_ORDER.indexOf(stage), [stage])
-
-  const handleLogin = async () => {
-    const loggedIn = await login()
-    if (loggedIn) {
-      navigate(from, { replace: true })
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: '#f5f5f5',
-        padding: 24,
-      }}
-    >
-      <Card style={{ width: 440 }} styles={{ body: { padding: 32 } }}>
-        <Typography.Title level={4} style={{ marginBottom: 8 }}>
-          Web3 AI Copilot
-        </Typography.Title>
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 24 }}>
-          连接钱包完成身份验证。签名仅用于确认钱包归属，
-          <strong>不会发起链上交易，也不消耗 gas</strong>。
-        </Typography.Paragraph>
-
-        <Button
-          type="primary"
-          size="large"
-          block
-          loading={busy || isConnecting}
-          onClick={handleLogin}
-          disabled={busy}
-        >
-          {busy ? stageText : isConnected ? '签名并登录' : '连接钱包'}
-        </Button>
-
-        {/* 连上之后把地址显示出来：多账号用户需要先确认"签的是哪一个"，
-            否则会在钱包里签完才发现拿错了号。 */}
-        {isConnected && address && !busy && (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginTop: 16 }}
-            title={`已连接 ${shorten(address)}`}
-            description="点击上方按钮签名，即可进入。"
-          />
-        )}
-
-        {busy && currentStep >= 0 && (
-          <Steps
-            size="small"
-            orientation="vertical"
-            current={currentStep}
-            style={{ marginTop: 24 }}
-            items={STEP_ORDER.map((key) => ({ title: STEP_LABEL[key] }))}
-          />
-        )}
-
-        {error && <Alert type="error" showIcon title={error} style={{ marginTop: 16 }} />}
-      </Card>
-    </div>
-  )
+  const from = (location.state as { from?: string } | null)?.from
+  useEffect(() => { if (auth.token && from) navigate(from, { replace: true }) }, [auth.token, from, navigate])
+  const stages = ['nonce', 'signing', 'verifying']
+  const step = stages.indexOf(wallet.stage)
+  return <div className="login-wrap"><div className="login-card">
+    {auth.token && <Note title="已连接">当前会话地址 {auth.address && shorten(auth.address)}。切换钱包前请退出当前会话。</Note>}
+    {from && <div className="login-continue">连接后继续前往 <b>{from === '/copilot' ? '对话' : from === '/portfolio' ? '代币余额' : '本人数据页面'}</b></div>}
+    <div className="login-head"><div className="logo">W3</div><h2>连接钱包</h2><p>用钱包签名证明地址归属，无需密码</p></div>
+    <div className="steps">{['请求 nonce', '钱包签名', '校验并签发凭证'].map((label, i) => <div className={`step ${auth.token || i < step ? 'done' : i === step ? 'active' : ''}`} key={label}>{i + 1} · {label}<span>{auth.token || i < step ? '已完成' : i === step ? wallet.stageText : '等待执行'}</span></div>)}</div>
+    <div className="siwe"><div className="siwe-h">待签名消息（SIWE / EIP-4361）<span className="proto-tag core">服务端生成</span></div><pre>{wallet.signingMessage ?? `连接钱包后，服务端将生成签名原文。
+消息包含登录域名、地址、nonce 和有效期。
+请核对钱包中的消息，不签署来源不明的请求。`}</pre></div>
+    {wallet.isConnected && wallet.address && <p className="login-address mono">已连接 {wallet.address}</p>}
+    {auth.token ? <Button block danger onClick={wallet.logout}>退出当前会话</Button> : <Button type="primary" block loading={wallet.busy || wallet.isConnecting} disabled={wallet.busy} onClick={() => void wallet.login()}>{wallet.busy ? wallet.stageText : wallet.isConnected ? '在钱包中签名' : '连接钱包'}</Button>}
+    <div className="login-foot">签名仅验证身份，不发起链上交易，也不消耗 Gas</div>
+    {wallet.error && <Alert type="error" showIcon title={wallet.error} description="本次登录未完成。确认钱包与网络后，可重新发起签名。" style={{ marginTop: 14 }} />}
+    <div style={{ marginTop: 14 }}><Note title="为什么安全">凭证只在服务器验证签名后签发，钱包地址由签名确认；前端不能声明另一个钱包的归属。</Note></div>
+    <div style={{ marginTop: 12 }}><Note title="切换钱包" warning>切换钱包意味着切换身份，会清除旧登录与个人数据缓存。访问凭证自动续期，登录会话失效后需要重新签名。</Note></div>
+  </div></div>
 }

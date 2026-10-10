@@ -32,6 +32,7 @@ from app.common.schemas import DataIssue
 from app.common.units import monetary_calculation
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
+from app.core.resources import BusinessResources
 from app.modules.asset import service as asset_service
 from app.modules.asset.schemas import WalletAssets
 from app.modules.asset.tokens import RiskClass, risk_class_of
@@ -196,23 +197,25 @@ def build_report(
     )
 
 
-async def assess(chain_id: int, owner: str) -> RiskReport:
+async def assess(chain_id: int, owner: str, *, resources: BusinessResources | None = None) -> RiskReport:
     """取该地址的资产与质押仓位，算出风险报告。
 
     两件事并发读取。质押不可用时保留响应及原因，但完整组合风险返回 unknown，
     不将剩余钱包资产误当成整个组合。
     """
     wallet, staked = await asyncio.gather(
-        asset_service.get_wallet_assets(chain_id, owner),
-        _load_staked(chain_id, owner),
+        asset_service.get_wallet_assets(chain_id, owner, resources=resources),
+        _load_staked(chain_id, owner, resources=resources),
     )
     return build_report(wallet, staked)
 
 
-async def _load_staked(chain_id: int, owner: str) -> tuple[staking_service.StakedSlice, ...] | None:
+async def _load_staked(
+    chain_id: int, owner: str, *, resources: BusinessResources | None = None
+) -> tuple[staking_service.StakedSlice, ...] | None:
     """取质押仓位。失败返回 None（= 不可知），不向上抛。"""
     try:
-        return await staking_service.get_staked_slices(chain_id, owner)
+        return await staking_service.get_staked_slices(chain_id, owner, resources=resources)
     except UpstreamError as exc:
         logger.warning("质押仓位不可用，本次不给出质押/流动比：%s", exc)
         return None

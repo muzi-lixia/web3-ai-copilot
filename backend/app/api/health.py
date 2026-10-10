@@ -21,8 +21,11 @@ async def health(request: Request) -> dict:
 @router.get("/ready", response_model=ApiResponse[dict])
 async def ready(request: Request) -> dict:
     """确认运行时已启动并持有原租约，上游模型故障由业务请求独立报告。"""
-    service = request.app.state.services.chat
-    if service.stopping:
-        raise ChatUnavailableError("聊天服务正在停止")
-    await service.verify_lease()
+    from sqlalchemy import text
+
+    try:
+        async with request.app.state.services.database.sessions() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception:
+        raise ChatUnavailableError("基础数据库不可用") from None
     return success({"status": "ready"})

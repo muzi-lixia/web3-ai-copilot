@@ -9,7 +9,7 @@ import type { ApiResponse, WalletAssets } from '../types/api'
  * 一份链清单 —— 换链只改后端配置，前端不动。
  * 需要做链切换时，把 chain_id 传进来即可，接口已经支持。
  */
-export async function fetchWalletAssets(address: string): Promise<WalletAssets> {
-  const { data } = await http.get<ApiResponse<WalletAssets>>(`/wallets/${address}/assets`)
+export async function fetchWalletAssets(): Promise<WalletAssets> {
+  const { data } = await http.get<ApiResponse<WalletAssets>>('/me/assets')
   return data.data
 }

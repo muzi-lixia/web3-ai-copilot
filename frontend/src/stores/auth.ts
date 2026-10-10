@@ -1,11 +1,15 @@
+import { clearChatCache, clearDifferentChatCache } from '../utils/chatCache.ts'
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 
 interface AuthState {
   token: string | null
+  refreshToken: string | null
   address: string | null
-  setAuth: (token: string, address: string) => void
-  clearAuth: () => void
+  expiresAt: string | null
+  sessionExpiresAt: string | null
+  setAuth: (token: string, address: string, refreshToken: string, metadata?: { expires_at?: string; session_expires_at?: string }) => void
+  clearAuth: (reason?: 'expired' | 'logout' | 'switch') => void
 }
 
 /**
@@ -19,9 +23,11 @@ export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
       token: null,
+      refreshToken: null,
       address: null,
-      setAuth: (token, address) => set({ token, address }),
-      clearAuth: () => set({ token: null, address: null }),
+      expiresAt: null, sessionExpiresAt: null,
+      setAuth: (token, address, refreshToken, metadata) => { clearDifferentChatCache(address); set({ token, address, refreshToken, expiresAt: metadata?.expires_at ?? null, sessionExpiresAt: metadata?.session_expires_at ?? null }) },
+      clearAuth: (reason = 'expired') => { if (reason !== 'expired') clearChatCache(); set({ token: null, address: null, refreshToken: null, expiresAt: null, sessionExpiresAt: null }) },
     }),
     {
       name: 'web3-copilot-auth',

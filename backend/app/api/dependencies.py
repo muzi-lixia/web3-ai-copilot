@@ -5,9 +5,9 @@ from typing import Annotated
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.ai.conversation.service import ChatRuntime
 from app.core.exceptions import UnauthorizedError
-from app.modules.auth.service import AuthService
+from app.core.resources import BusinessResources
+from app.foundation.auth import AuthService
 
 
 def get_auth_service(request: Request) -> AuthService:
@@ -15,13 +15,15 @@ def get_auth_service(request: Request) -> AuthService:
     return request.app.state.services.auth
 
 
-def get_chat_service(request: Request) -> ChatRuntime:
-    """取得当前应用已装配的聊天运行时，HTTP 层不直接访问仓储或模型。"""
-    return request.app.state.services.chat
+def get_business_resources(request: Request) -> BusinessResources:
+    """所有业务路由使用当前应用的配置与缓存，不读取另一份全局配置。"""
+    return request.app.state.services.resources
+
+
+BusinessResourcesDep = Annotated[BusinessResources, Depends(get_business_resources)]
 
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
-ChatServiceDep = Annotated[ChatRuntime, Depends(get_chat_service)]
 
 
 bearer = HTTPBearer(auto_error=False, scheme_name="WalletBearer")
@@ -34,7 +36,7 @@ async def get_current_address(
     """使用标准 Bearer 安全方案验证 JWT；OpenAPI 同步标注所需认证，不信任自报身份。"""
     if credentials is None or not credentials.credentials.strip():
         raise UnauthorizedError("缺少登录凭证")
-    return auth.decode_token(credentials.credentials)
+    return (await auth.authenticate(credentials.credentials)).address
 
 
 CurrentAddress = Annotated[str, Depends(get_current_address)]

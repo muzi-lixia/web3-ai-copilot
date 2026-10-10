@@ -1,5 +1,5 @@
 /**
- * 与后端modules 下各领域的 schemas.py 和 ai/conversation/schemas.py 对应的类型定义。
+ * 与后端基础业务契约及 Agent 展示快照对应的类型定义。
  *
  * ⚠️ 金额字段的序列化约定：后端用 Python `Decimal` 表示金额，Pydantic 序列化为 JSON
  * **字符串**（如 `"23482"`）而不是 number —— 链上金额是 bigint，JS 的 float64 会在
@@ -250,15 +250,16 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   status: string
+  result_refs?: { result_id: string; isComplete: boolean; scope?: string; chain_ids?: number[];
+    symbols?: string[]; unpriced_count?: number; queriedAt?: string; currency?: string }[]
 }
 /** 一页历史加恢复信息；active_turn_id 不为空时继续订阅后台生成。 */
 export interface MessagePage {
   items: ChatMessage[]
   next_cursor: number | null
   active_turn_id: string | null
-  summary_version: number | null
 }
-/** 完整正文快照；version 属于轮次，不能与消息 seq 或 summary_version 混用。 */
+/** 完整正文快照；version 属于轮次，不能与消息 seq 混用。 */
 export interface TurnAccepted {
   turn_id: string
   created: boolean
@@ -271,8 +272,9 @@ export interface TurnSnapshot {
   status: string
   message: ChatMessage
   error: string | null
-  summary_version?: number | null
-  context_info?: { issues?: string[] }
+  context_info?: { execution_phase?: string }
+  /** 终态尚未落库；此时仍订阅补写结果，不允许发送新一轮。 */
+  persistence_pending?: boolean
 }
 
 /* ── auth（钱包登录）───────────────────────────────────── */
@@ -295,12 +297,15 @@ export interface NonceResponse {
 }
 
 export interface VerifyRequest {
-  address: string
+  message: string
   /** 0x + 130 位十六进制 */
   signature: string
 }
 
 export interface TokenResponse {
+  session_expires_at: string
+  refresh_token: string
+  user_id: string
   token: string
   token_type: string
   address: string

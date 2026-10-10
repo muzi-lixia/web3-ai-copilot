@@ -27,6 +27,7 @@ function mockReply(body, status = 200) {
     if (status >= 400) throw new AxiosError('HTTP failure', undefined, config, null, response)
     return response
   }
+  chat.agentHttp.defaults.adapter = http.defaults.adapter
   return calls
 }
 
@@ -46,11 +47,11 @@ test('response unwrap preserves null, zero and arrays and rejects nonzero busine
 test('login and business APIs use current resources and return unwrapped domain data', async () => {
   const cases = [
     [() => auth.fetchNonce('0x123'), 'post', '/auth/challenges', { nonce: 'n', message: '签名原文' }],
-    [() => auth.verifySignature({ address: '0x123', signature: 'signed' }), 'post', '/auth/tokens', { token: 'jwt', token_type: 'Bearer' }],
+    [() => auth.verifySignature({ message: '签名原文', signature: 'signed' }), 'post', '/auth/tokens', { token: 'jwt', token_type: 'Bearer' }],
     [() => auth.fetchMe(), 'get', '/users/me', { address: '0x123' }],
-    [() => fetchWalletAssets('0x123'), 'get', '/wallets/0x123/assets', { amount: '999999999999999999.0000001', price: null }],
-    [() => fetchRiskReport('0x123'), 'get', '/wallets/0x123/risk-report', { risk_level: 'unknown' }],
-    [() => fetchStakingPositions('0x123'), 'get', '/wallets/0x123/staking-positions', { positions: [] }],
+    [() => fetchWalletAssets(), 'get', '/me/assets', { amount: '999999999999999999.0000001', price: null }],
+    [() => fetchRiskReport(), 'get', '/me/risk-report', { risk_level: 'unknown' }],
+    [() => fetchStakingPositions(), 'get', '/me/staking-positions', { positions: [] }],
     [() => fetchMarketQuotes({ chainId: 80094, symbols: ['BERA', 'WETH'] }), 'get', '/markets/quotes', { tokens: [] }],
   ]
   for (const [call, method, path, data] of cases) {
@@ -159,4 +160,61 @@ test('a non-stream 200 response stops SSE recovery instead of reconnecting forev
     globalThis.fetch = originalFetch
     http.defaults.baseURL = originalBase
   }
+})
+
+
+test('new resource calls separate public business reads and private Agent settings', async () => {
+  const resources = await import('../src/api/resources.ts')
+  let calls = mockReply(envelope([{ chain_id: 80094, name: 'Berachain' }]))
+  await resources.getChains()
+  assert.equal(calls[0].url, '/chains')
+  calls = mockReply(envelope({ result_id: 'balance-result' }), 201)
+  await resources.queryAssets(80094, 'BERA', 'CNY')
+  assert.equal(calls[0].url, '/me/balance-results')
+  assert.deepEqual(JSON.parse(calls[0].data), { chain_id: 80094, symbol: 'BERA', currency: 'CNY' })
+  assert.equal(calls[0].method, 'post')
+  calls = mockReply(envelope({ provider: 'ollama' }))
+  await resources.getModel()
+  assert.equal(calls[0].url, '/chat/session/model')
+  await resources.selectModel('deepseek', true)
+  assert.deepEqual(JSON.parse(calls[1].data), { provider: 'deepseek', accept_external: true })
+  calls = mockReply(envelope({ price: '0.123456789012345678' }))
+  assert.equal((await resources.getPublicPrice(80094, 'BERA', 'CNY')).price, '0.123456789012345678')
+  assert.deepEqual(calls[0].params, { chain_id: 80094, symbol: 'BERA', currency: 'CNY' })
+})
+
+test('refresh network failure retains identity, explicit session rejection clears it', async () => {
+  const axios = (await import('axios')).default
+  const original = axios.defaults.adapter
+  useAuthStore.getState().setAuth('access-old', 'wallet-a', 'refresh-a')
+  http.defaults.adapter = async config => {
+    const response = { data: { code: 40103, msg: 'access expired', data: null }, status: 401, statusText: '', headers: {}, config }
+    throw new AxiosError('access expired', undefined, config, null, response)
+  }
+  try {
+    axios.defaults.adapter = async () => { throw new AxiosError('network unavailable') }
+    await assert.rejects(http.get('/users/me'), error => error.status === 503)
+    assert.equal(useAuthStore.getState().token, 'access-old')
+    assert.equal(useAuthStore.getState().refreshToken, 'refresh-a')
+    axios.defaults.adapter = async config => {
+      const response = { data: { code: 40101, msg: 'session expired', data: null }, status: 401, statusText: '', headers: {}, config }
+      throw new AxiosError('session expired', undefined, config, null, response)
+    }
+    await assert.rejects(http.get('/users/me'), error => error.status === 401)
+    assert.equal(useAuthStore.getState().token, null)
+  } finally { axios.defaults.adapter = original }
+})
+
+test('offline safe history survives expiry but is removed on wallet switch or logout', async () => {
+  const cache = await import('../src/utils/chatCache.ts')
+  const messages = [{ id: 'm', role: 'assistant', content: '查询完成', result_refs: [{ result_id: 'r' }] }]
+  useAuthStore.getState().setAuth('token-a', 'wallet-a', 'refresh-a')
+  cache.saveChatCache('wallet-a', messages)
+  useAuthStore.getState().clearAuth()
+  assert.equal(cache.readChatCache().owner, 'wallet-a')
+  useAuthStore.getState().setAuth('token-b', 'wallet-b', 'refresh-b')
+  assert.equal(cache.readChatCache(), null)
+  cache.saveChatCache('wallet-b', messages)
+  useAuthStore.getState().clearAuth('logout')
+  assert.equal(cache.readChatCache(), null)
 })

@@ -37,14 +37,16 @@ export async function consumeSSE(
 
 /** 服务端已经明确报告的业务错误，不等同于网络 EOF；应展示原因而不是自动重连。 */
 export class SSEStreamError extends Error {
-  constructor(message: string) {
+  code?: string
+  constructor(message: string, code?: string) {
     super(message)
     this.name = 'SSEStreamError'
+    this.code = code
   }
 }
 
 export function parseSSEEvent(data: string) {
   const event = JSON.parse(data)
-  if (event.type === 'error') throw new SSEStreamError(event.message ?? '对话连接失败')
+  if (event.type === 'error') throw new SSEStreamError(event.message ?? '对话连接失败', event.code)
   return event
 }

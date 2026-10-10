@@ -64,13 +64,6 @@ class NonceInvalidError(AppError):
     code = "nonce_invalid"
 
 
-class SignatureInvalidError(AppError):
-    """签名无法解析，或反推出的地址与请求地址不一致。"""
-
-    status_code = 401
-    code = "signature_invalid"
-
-
 class RateLimitError(AppError):
     """登录频率或鉴权状态容量达到限制，调用方应稍后再试。"""
 

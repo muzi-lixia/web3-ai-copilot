@@ -1,6 +1,6 @@
 import { WagmiAdapter } from '@reown/appkit-adapter-wagmi'
 import type { AppKitNetwork } from '@reown/appkit/networks'
-import { berachain } from '@reown/appkit/networks'
+import { berachain, mainnet, bsc, polygon, arbitrum, base } from '@reown/appkit/networks'
 import { createAppKit } from '@reown/appkit/react'
 
 /**
@@ -24,8 +24,8 @@ if (!projectId) {
   )
 }
 
-/** 目前只登记 Berachain：后端链注册表也只有这一条（backend/app/infrastructure/blockchain/chains.py）。 */
-const networks = [berachain] as [AppKitNetwork, ...AppKitNetwork[]]
+/** 登录签名支持已接入的 EVM 网络；资产查询网络由基础服务目录提供。 */
+const networks = [berachain, mainnet, bsc, polygon, arbitrum, base] as [AppKitNetwork, ...AppKitNetwork[]]
 
 const wagmiAdapter = new WagmiAdapter({ projectId, networks })
 

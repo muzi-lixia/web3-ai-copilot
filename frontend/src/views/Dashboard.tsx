@@ -82,17 +82,17 @@ export default function Dashboard() {
 
   const assetsQuery = useQuery({
     queryKey: ['wallet-assets', address],
-    queryFn: () => fetchWalletAssets(address!),
+    queryFn: () => fetchWalletAssets(),
     enabled: Boolean(address),
   })
   const riskQuery = useQuery({
     queryKey: ['risk-report', address],
-    queryFn: () => fetchRiskReport(address!),
+    queryFn: () => fetchRiskReport(),
     enabled: Boolean(address),
   })
   const stakingQuery = useQuery({
     queryKey: ['staking-positions', address],
-    queryFn: () => fetchStakingPositions(address!),
+    queryFn: () => fetchStakingPositions(),
     enabled: Boolean(address),
   })
 

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from app.common.units import monetary_calculation
-from app.core.config import settings
+from app.core.resources import BusinessResources, resolve_resources
 from app.infrastructure.blockchain.chains import ChainMeta
 from app.modules.market.schemas import MarketSource
 
@@ -33,14 +33,19 @@ class RawQuote:
 
 @monetary_calculation
 async def fetch_dexscreener(
-    client: httpx.AsyncClient, chain: ChainMeta, addresses: tuple[str, ...]
+    client: httpx.AsyncClient,
+    chain: ChainMeta,
+    addresses: tuple[str, ...],
+    *,
+    resources: BusinessResources | None = None,
 ) -> dict[str, RawQuote]:
     """DexScreener：唯一能一次给全四个字段的免费源。
 
     用按链端点 `/tokens/v1/{chainId}/{addresses}`（一次最多 30 个地址）。它只返回
     该链的池子，比拿旧版 `/latest/dex/tokens/` 再自己按 chainId 过滤少一层出错机会。
     """
-    url = f"{settings.dexscreener_base_url}/tokens/v1/{chain.dexscreener_id}/{','.join(addresses)}"
+    base_url = resolve_resources(resources).settings.dexscreener_base_url
+    url = f"{base_url}/tokens/v1/{chain.dexscreener_id}/{','.join(addresses)}"
     response = await client.get(url)
     response.raise_for_status()
     payload = response.json()
@@ -85,11 +90,17 @@ async def fetch_dexscreener(
 
 
 async def fetch_defillama(
-    client: httpx.AsyncClient, chain: ChainMeta, addresses: tuple[str, ...]
+    client: httpx.AsyncClient,
+    chain: ChainMeta,
+    addresses: tuple[str, ...],
+    *,
+    resources: BusinessResources | None = None,
 ) -> dict[str, RawQuote]:
     """DefiLlama：只有价格，但 BGT 这类无 DEX 池的币只有它给得出价。"""
     coins = ",".join(f"{chain.defillama_id}:{address}" for address in addresses)
-    response = await client.get(f"{settings.defillama_base_url}/prices/current/{coins}")
+    response = await client.get(
+        f"{resolve_resources(resources).settings.defillama_base_url}/prices/current/{coins}"
+    )
     response.raise_for_status()
     payload = response.json().get("coins") or {}
 

@@ -66,7 +66,7 @@ export default function Risk() {
 
   const { data, error, isFetching } = useQuery({
     queryKey: ['risk-report', address],
-    queryFn: () => fetchRiskReport(address!),
+    queryFn: () => fetchRiskReport(),
     enabled: Boolean(address),
   })
 
