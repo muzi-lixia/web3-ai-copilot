@@ -61,6 +61,13 @@ export function shorten(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`
 }
 
+/** 消息时间戳只到秒，按浏览器本地时区渲染；解析不出的值不显示。 */
+export function formatClock(iso?: string): string {
+  if (!iso) return ''
+  const at = new Date(iso)
+  return Number.isNaN(at.getTime()) ? '' : at.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
 
 /** USD 正文与悬停提示均最多保留 6 位小数，去除尾零。
  * 仅操作十进制字符串，不改变后端金额，也不引入浮点精度损失。

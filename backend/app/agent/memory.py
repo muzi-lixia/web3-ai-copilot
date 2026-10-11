@@ -9,10 +9,21 @@ from app.core.exceptions import ContextTooLargeError
 from app.core.logging import span
 
 
+def _estimate_tokens(text: str) -> int:
+    """估算一段文本的 token 数，不依赖任何 tokenizer。
+
+    规则：ASCII 四字符算 1 token，非 ASCII 一字算 1 token。两个系数都偏高
+    （英文真实约 4 字符 / token，中文约 1.5 字 / token），偏差方向固定为高估 ——
+    宁可多算，也不能让上游按真实窗口把历史静默截断。
+    """
+    wide = sum(1 for ch in text if ord(ch) > 127)
+    return (len(text) - wide) // 4 + wide + 1
+
+
 class ContextBudget(AgentMiddleware):
     """把对话压进模型窗口，并在工具执行前收紧参数边界。
 
-    预算用保守计数而不是真实 tokenizer：宁可少算，也不能指望模型服务静默截断。
+    预算用估算而不是真实 tokenizer：少一个带词表的依赖，偏差方向固定为高估。
     """
 
     def __init__(self, settings):
@@ -20,7 +31,10 @@ class ContextBudget(AgentMiddleware):
         self.settings = settings
 
     async def abefore_model(self, state, runtime):
-        """UTF-8 字节作保守上界；计入工具 schema、系统提示、输出预留。
+        """按估算 token 作保守上界；计入工具 schema 与全部历史消息。
+
+        系统提示不在 state 的 messages 里，这里计不到 —— 它是固定开销，在 16384
+        的预算下占比很小，但实际余量会比算出来的略少一点。
 
         删除旧 user 之前的完整轮次，不拆开 assistant tool_call / ToolMessage 对。
         单轮超预算明确拒绝，不能靠模型服务静默截断。
@@ -32,16 +46,21 @@ class ContextBudget(AgentMiddleware):
         window = s.model_context_window or 16384
         budget = min(s.agent_context_tokens, window - s.model_output_tokens - s.model_context_reserve)
         # overhead 是工具 schema 的固定占用，必须计入体积，否则会低估输入。
-        overhead = len(json.dumps([t.tool_call_schema.model_json_schema() for t in TOOLS]).encode()) + 2048
+        # ensure_ascii=False：schema 里的中文 description 按原文计，转成 \uXXXX 会重复高估。
+        # 这里不再额外加常数余量 —— 余量已由 model_context_reserve 统一留出，重复预留会让
+        # 预算被两个说不清来路的数字同时侵蚀。
+        overhead = _estimate_tokens(
+            json.dumps([t.tool_call_schema.model_json_schema() for t in TOOLS], ensure_ascii=False)
+        )
         messages = list(state["messages"])
         removed = []
 
         def size():
-            """估算当前消息集的字节体积（含工具 schema 的固定开销）。
+            """估算当前消息集的 token 数（含工具 schema 的固定开销）。
 
-            按 UTF-8 字节估算：中文比字符数占得更多；overhead 已包含工具 schema。
+            overhead 已含工具 schema；消息体用 _estimate_tokens 逐条累加。
             """
-            return overhead + sum(len(m.model_dump_json().encode()) for m in messages)
+            return overhead + sum(_estimate_tokens(m.model_dump_json()) for m in messages)
 
         # 超预算就从最旧的整轮开始丢：切点只放在 human 消息上，保证不会把 assistant 的
         # tool_call 与它的 ToolMessage 结果拆开（拆开会让历史语义残缺）。从索引 1 开始找，
@@ -68,6 +87,11 @@ class ContextBudget(AgentMiddleware):
 
         if request.tool is None:
             return await handler(request)
+        # 工具调用轨迹：所有工具调用都经过这里，所以只在这一处记录就不会漏。
+        # 记在参数校验之前 —— 参数不合规被拒的调用同样要留痕，那正是要观测的部分。
+        request.runtime.context.tool_calls.append(
+            {"tool": request.tool_call["name"], "args": request.tool_call["args"]}
+        )
         # 只放行 schema 里声明的业务参数：模型可能借框架字段（如 runtime）注入身份。
         # 这里回一条工具错误让模型自我纠正，而不是抛异常打断整轮。
         allowed = set(request.tool.args_schema.model_fields)

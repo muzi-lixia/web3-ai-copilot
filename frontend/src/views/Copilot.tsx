@@ -1,9 +1,9 @@
 /** 单会话工作区：每个钱包只有一段固定对话，安全历史和运行状态由服务器维护。 */
-import { Alert, Button, Empty, Input, Space, Spin, Typography } from 'antd'
+import { Alert, Button, Empty, Input, Space, Spin } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import { getModel } from '../api/resources'
 import { Note } from '../components/PageParts'
-import { shorten } from '../utils/format'
+import { formatClock, shorten } from '../utils/format'
 import { useEffect, useRef, useState } from 'react'
 
 import { cancelTurn, clearConversation, followTurn, getTurn, loadMessages, openSession, retryTurn, submitTurn } from '../api/chat'
@@ -206,23 +206,38 @@ function Workspace() {
         更早的消息
       </Button>}
       {loading ? <Spin /> : !messages.length && <Empty description="开始提问，例如：查询我的 BERA 余额" />}
-      {messages.map((item) => <div className={`msg ${item.role === 'user' ? 'me' : ''}`} key={item.id}><div className={`av ${item.role === 'user' ? 'me' : 'ai'}`}>{item.role === 'user' ? '我' : 'AI'}</div><div className="message-body">
-        {!!item.result_refs?.length && item.result_refs.map(ref => <div className="tool" key={ref.result_id}><div className="tool-h"><i className={`dot ${ref.isComplete ? 'ok' : 'warn'}`} /><span className="nm">资产查询结果</span><span className="meta">{ref.isComplete ? '已完成' : '部分结果'}</span></div><div className="tool-b"><div className="kv"><span className="k">查询范围</span><span className="v">{ref.scope === 'specified_token' ? '指定代币' : '已登记代币'} · {ref.chain_ids?.length ?? '—'} 个网络</span></div><div className="kv"><span className="k">回灌模型</span><span className="v">仅元数据 · {ref.symbols?.join(' / ') ?? '结果引用'} · 未计价 {ref.unpriced_count ?? '—'} 项</span></div><div className="kv"><span className="k">真实数据</span><span className="v">通过展示通道读取，不进入模型与 Trace</span></div></div></div>)}
-        {item.content && <div className="bub"><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{item.content}</div>{['queued', 'running'].includes(item.status) && <span className="stream-cursor" />}</div>}
-        {item.result_refs?.map(ref => <BalanceResult compact key={ref.result_id} id={ref.result_id} />)}
-        {STATUS[item.status] && item.turn_id !== pendingTurn && <div className="message-status">{STATUS[item.status]}</div>}
-      </div></div>)}
-      {active && (connectionFailed ? <Typography.Text type="warning">连接已断开，点击恢复对话确认生成状态。</Typography.Text> :
-        <Space><Spin size="small" />{reconnecting ? '连接中断，正在恢复…' : turnProgressText(phase)}</Space>)}
+      {messages.map((item) => {
+        const itemRefs = item.result_refs ?? []
+        // 用户气泡右下角的时间来自提问时刻，与回答共用同一个值。
+        const sentAt = item.role === 'user' ? formatClock(item.created_at) : ''
+        if (item.role === 'user') return <div className="msg me" key={item.id}>
+          <div className="av me">我</div>
+          <div className="me-col"><div className="bub"><div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{item.content}</div></div>
+            {sentAt && <div className="me-t">{sentAt}</div>}</div>
+        </div>
+        const speaking = ['queued', 'running'].includes(item.status)
+        // 「结果」块顶部那句模型话；生成中带光标，还没有正文时也占位。
+        const say = (item.content || speaking) ? <div className="res-say" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{item.content}{speaking && <span className="stream-cursor" />}</div> : null
+        // 回答区固定两段：结果常显，数据来源与明细折叠；纯文字回答只有结果块。
+        return <div className="msg" key={item.id}>
+          <div className="av ai">AI</div>
+          <div className="ans">
+            {itemRefs.length
+              ? itemRefs.map((ref, index) => <BalanceResult compact key={ref.result_id} id={ref.result_id} say={index === 0 ? say : null} />)
+              : <div className="blk"><div className="blk-b">{say}</div></div>}
+            {STATUS[item.status] && item.turn_id !== pendingTurn && <div className="message-status">{STATUS[item.status]}</div>}
+          </div>
+        </div>
+      })}
+      {active && !connectionFailed && <div className="live-line"><span className="spin" /><span>{reconnecting ? '连接中断，正在恢复…' : turnProgressText(phase)}</span></div>}
+      {connectionFailed && <div className="stream-bad"><span className="dot" style={{ background: '#FF8A9B', flex: 'none' }} /><span>{error ?? '连接已断开'}，已生成的内容不会丢失。</span><Button size="small" loading={loading} disabled={sending || loadingEarlier} onClick={() => { if (lifetime.current) void restore(lifetime.current.signal) }}>恢复对话</Button></div>}
       <div ref={end} />
     </div>
-    {error && <Alert type="warning" showIcon title={error} style={{ marginBlock: 12 }} />}
+    {error && !connectionFailed && <Alert type="warning" showIcon title={error} style={{ marginBlock: 12 }} />}
     {pendingTurn && <Alert type="info" showIcon title={connectionFailed
       ? '回答状态尚未保存，连接已断开，请恢复对话确认结果。'
       : '回答状态尚未保存，正在补写。保存完成后会自动更新。'}
       style={{ marginBlock: 12 }} />}
-    {connectionFailed && <Button loading={loading} disabled={sending || loadingEarlier}
-      onClick={() => { if (lifetime.current) void restore(lifetime.current.signal) }}>恢复对话</Button>}
     {!active && !pendingTurn && last && FAILED.includes(last.status) && <Button disabled={blocked}
       onClick={() => void retry(last.turn_id)}>重试上一轮</Button>}
     <div className="composer"><div className="composer-box"><Input.TextArea value={input} onChange={(event) => setInput(event.target.value)} maxLength={2000}

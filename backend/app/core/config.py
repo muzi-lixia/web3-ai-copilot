@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     auth_rate_per_minute: int = Field(default=30, gt=0)
     """nonce 有效期 5 分钟。签名是一次性动作，过期即作废。"""
     siwe_domain: str = "localhost:5173"
+    """写入签名消息的域名，让用户在钱包里看到「我在向谁授权」。"""
     siwe_uri: str = "http://localhost:5173"
     access_token_minutes: int = Field(default=15, ge=1, le=60)
     login_session_days: int = Field(default=7, ge=1, le=30)
@@ -114,8 +115,8 @@ class Settings(BaseSettings):
     request_limit_per_minute: int = Field(default=60, ge=1)
     anonymous_limit_per_minute: int = Field(default=20, ge=1)
     cache_max_entries: int = Field(default=256, ge=1)
-    agent_context_tokens: int = Field(default=8192, ge=2048)
-    """写入签名消息的域名，让用户在钱包里看到「我在向谁授权」。"""
+    # 每次模型调用前允许进入上下文的历史预算（估算 token，口径见 agent/memory.py）。
+    agent_context_tokens: int = Field(default=16384, ge=2048)
 
     # ── 质押 ──────────────────────────────────────────────
     # 质押的 APY 与收益只有 Berachain 自己算得出来（它是 PoL 激励回购后注入金库形成的），

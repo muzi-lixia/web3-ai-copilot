@@ -141,18 +141,21 @@ class ConversationRepository:
         value["seq"] = rank * 2
         return value
 
-    async def update(self, user, tid, answer, state, results, *, error=None, usage=None):
+    async def update(self, user, tid, answer, state, results, *, error=None, usage=None, tool_trace=None):
         """写入一轮的展示状态；answer 是全量正文，不是增量。
 
         version 每次自增，订阅端据此判断快照是否变新 —— 所以这里必须整体覆盖，
         不能只写新增片段，否则断线重连会拼出互相矛盾的正文。
+        tool_trace 传 None 表示不改动该列：只有生成过程会更新轨迹，
+        取消、补写终态等路径回写时应保留已记录的内容。
         """
         async with self.db.transaction(user) as s:
             # version 由数据库自增，是订阅端判断「快照是否变新」的唯一依据。
             # answer 整体覆盖而非追加：任何时刻读到的都是一份自洽的完整正文。
             await s.execute(
                 text("""UPDATE agent_turns SET answer=:a,state=:s,
-                results=CAST(:r AS jsonb),error_code=:e,usage=CAST(:g AS jsonb),version=version+1
+                results=CAST(:r AS jsonb),error_code=:e,usage=CAST(:g AS jsonb),
+                tool_trace=coalesce(CAST(:c AS jsonb),tool_trace),version=version+1
                 WHERE id=:t AND user_id=:u"""),
                 dict(
                     a=answer,
@@ -160,6 +163,7 @@ class ConversationRepository:
                     r=json.dumps(results),
                     e=error,
                     g=json.dumps(usage or {}),
+                    c=None if tool_trace is None else json.dumps(tool_trace),
                     t=tid,
                     u=user,
                 ),
@@ -227,6 +231,7 @@ class ConversationRepository:
                     # 迁移前未保存原文，只能显示既有安全文本，不能猜测恢复。
                     content=row["display_text"] if row.get("display_text") is not None else row["query"],
                     status="complete",
+                    created_at=row["created_at"].isoformat(),
                 ),
                 self.snapshot(dict(row), seq + 1)["message"],
             ]
@@ -259,6 +264,8 @@ class ConversationRepository:
                 content=row["answer"],
                 status=state,
                 result_refs=row["results"],
+                # 提问时刻，与同轮的用户消息共用；回答完成时刻另行记录。
+                created_at=row["created_at"].isoformat(),
             ),
             error=row["error_code"],
             # execution_phase 直接复用 DB state，目前只可能是 queued/running/completed/failed/cancelled。

@@ -81,7 +81,11 @@ async def query(runtime, name, payload):
 
 @tool(
     args_schema=OverviewArguments,
-    description="查询本人已收录代币清单余额概览，不代表全量资产；每轮重新查询。",
+    description="""查询当前钱包已收录代币清单的余额概览。
+    能力限制：仅返回预收录代币，无法查询合约外未收录代币、部分NFT；每轮请求都会重新拉取链上数据，不存在缓存。
+    适用：用户想查看整体持仓概览、全部收录代币汇总，没有指定查询某一个具体币种。
+    禁止使用：用户明确点名单个/多个代币（如查USDC余额、ETH持仓），
+    此时必须调用 get_my_token_balance，不要使用本概览工具。""",
 )
 async def get_my_balance_overview(
     runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
@@ -99,12 +103,14 @@ async def get_my_balance_overview(
 
 
 @tool(
-    args_schema=BalanceArguments, description="查询本人明确币种余额；BERA/WBERA独立，不猜币种，不扩大范围。"
+    args_schema=BalanceArguments,
+    description="查询本人某个币种的余额，只在用户说「我的/持有/余额」或问「我有多少 X」时使用。"
+    "只问「X 多少钱」应改用 get_token_price。BERA/WBERA 独立，不猜币种，不扩大范围。",
 )
 async def get_my_token_balance(
     symbol: str, runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
 ):
-    """查询指定代币，身份只能来自运行上下文。
+    """查询指定代币余额，身份只能来自运行上下文。
 
     Args:
         symbol: 用户明确指定的符号。
@@ -129,7 +135,10 @@ async def get_my_token_balance(
     )
 
 
-@tool(args_schema=ChainArguments, description="查询支持的链 ID 和代币清单，公开数据。")
+@tool(
+    args_schema=ChainArguments,
+    description="查询平台支持的链 ID 与代币清单，回答「支持哪些链/币」这类问题；不查本人持仓。",
+)
 async def get_chain_info(runtime: ToolRuntime[RunContext], chain_id: int | None = None):
     """读取公开网络配置。
 
@@ -143,7 +152,11 @@ async def get_chain_info(runtime: ToolRuntime[RunContext], chain_id: int | None 
     return json.dumps([c for c in data if chain_id is None or c["chain_id"] == chain_id])
 
 
-@tool(args_schema=BalanceArguments, description="查询公开代币 USD 行情，价格不是用户余额。")
+@tool(
+    args_schema=BalanceArguments,
+    description="查询公开代币行情价格，回答「X 多少钱」。这是市场价格，不是用户余额；"
+    "问「我有多少 X」应改用 get_my_token_balance。",
+)
 async def get_token_price(
     symbol: str, runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
 ):
@@ -169,7 +182,9 @@ async def get_token_price(
 
 
 @tool(
-    args_schema=AggregateArguments, description="汇总当前对话已有结果引用；后端去重和求和，模型不填写金额。"
+    args_schema=AggregateArguments,
+    description="汇总当前对话已有的结果引用，后端去重求和，模型不填写金额；"
+    "只在用户要求合并前几次结果时使用。",
 )
 async def aggregate_results(result_ids: list[str], runtime: ToolRuntime[RunContext], currency: str = "USD"):
     """汇总已经生成的业务结果。

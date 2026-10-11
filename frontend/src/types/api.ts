@@ -250,6 +250,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   status: string
+  /** 提问时刻；历史与快照共用同一个值，格式为 ISO 8601。 */
+  created_at?: string
   result_refs?: { result_id: string; isComplete: boolean; scope?: string; chain_ids?: number[];
     symbols?: string[]; unpriced_count?: number; queriedAt?: string; currency?: string }[]
 }

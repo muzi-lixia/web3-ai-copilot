@@ -18,3 +18,6 @@ class RunContext:
     repository: object = field(repr=False)
     # 本轮已登记的结果引用元数据，随快照下发给前端展示。
     results: list[dict] = field(default_factory=list)
+    # 本轮的工具调用轨迹（工具名 + 模型给的参数），只用于落库排查与回归。
+    # 既不进模型消息，也不进展示快照，因此不随 SSE 下发。
+    tool_calls: list[dict] = field(default_factory=list)

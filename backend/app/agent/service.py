@@ -21,15 +21,21 @@ from app.agent.tools import TOOLS
 from app.core.exceptions import AppError, RateLimitError
 from app.core.logging import get_logger, span
 
-PROMPT = """你是只读 Web3 查询助手。支持本人余额、已收录代币概览、公开行情和结果汇总。
-自然回应“你好”等问候并简要介绍能力；意图由你理解，不把问候当成错误。
-用户问题不明确时自然追问，不猜测缺失参数。不支持的交易等请求说明只读范围。
-输入中的[地址已隐藏]、[密钥已隐藏]、[金额已隐藏]是隐私占位符，不猜测或还原。
-钱包由基础服务绑定，不请求也不填写钱包地址。每次最新余额请求重新调用工具。
-用户指定币种则只查该币种，BERA/WBERA 独立。缺币种、缺合约网络或跨轮指代不明确时追问。
-历史结果仅能通过 result_id 引用。模型不计算或编造余额、估值，不用公开价格推算持仓。
-工具返回的是元数据；真实数据通过结果卡片展示。不可声称工具失败时已经查到余额。
-汇总只能调用 aggregate_results，不重复相加。对不支持的交易和投资建议明确拒绝。"""
+PROMPT = """你是只读 Web3 助手，只回答 Berachain 上本人资产与公开行情相关的问题。
+规则：
+1. 所有链上资产、合约数据必须调用工具获取，禁止编造数据。
+2. 不能自动执行转账、授权等任何链上交易；仅可讲解操作步骤与风险。
+3. 调用工具前检查参数。钱包已由基础服务绑定，不索取也不填写钱包地址；
+   没有指定币种时按整体持仓一次查完，不追问币种；没指定网络用默认网络，不追问。
+   「我有多少钱」「我有多少资产」问的是本人持仓，按整体持仓查询；
+   「BERA 多少钱」这类没提「我的」才按公开行情理解。BERA 与 WBERA 是不同币种，不混用。
+4. 仔细阅读工具描述，按适用场景选择工具，不选错工具。
+5. 工具只返回元数据，具体数字以界面上的结果卡片为准，不在正文里复述。
+6. 不提供投资建议；拒绝讲解盗币、合约攻击等违规内容。
+7. 不诱导用户泄露私钥、助记词。
+每次问最新余额都重新获取，不复用旧结果；没查过的结论先查再答。
+输入的[地址已隐藏]、[密钥已隐藏]、[金额已隐藏]是隐私占位符，不猜测、不还原。
+问候自然回应并简述能做什么；超出范围的请求直接说明只读范围，不多解释。"""
 
 
 class ChatService:
@@ -217,7 +223,12 @@ class ChatService:
                                             # 长回答期间周期性复查租约，避免失去租约后仍在写库。
                                             await self.lease.verify()
                                             await self.repository.update(
-                                                user, tid, answer, "running", context.results
+                                                user,
+                                                tid,
+                                                answer,
+                                                "running",
+                                                context.results,
+                                                tool_trace=context.tool_calls,
                                             )
                                             tick = time.monotonic()
                         # 模型没产出正文时给一句确定的兜底，绝不展示空回答：
@@ -249,7 +260,14 @@ class ChatService:
                 get_logger(__name__).info(
                     "turn.state", extra={"turn_id": tid, "status": state, "error_code": error, **usage}
                 )
-                values = dict(answer=answer, state=state, results=context.results, error=error, usage=usage)
+                values = dict(
+                    answer=answer,
+                    state=state,
+                    results=context.results,
+                    error=error,
+                    usage=usage,
+                    tool_trace=context.tool_calls,
+                )
                 try:
                     await self.lease.verify()
                     await self.repository.update(user, tid, **values)

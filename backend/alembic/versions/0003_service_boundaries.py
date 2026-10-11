@@ -1,9 +1,9 @@
-"""独立认证、结果与轻量对话表；保留既有表作为只读历史，不破坏原数据。"""
+"""迁移链起点：建立认证、结果与轻量对话表，并配置 RLS 与启动恢复函数。"""
 
 from alembic import op
 
 revision = "0003_service_boundaries"
-down_revision = "0002_retry_integrity"
+down_revision = None
 branch_labels = depends_on = None
 
 
