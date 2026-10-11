@@ -93,6 +93,7 @@ def get_chain(chain_id: int) -> ChainMeta:
 # 保留既有 Berachain 业务配置，追加需求中的五条 EVM 网络。生产节点走 RPC_OVERRIDES。
 # 公共节点仅作开发默认；所有 RPC 调用会校验实际 chain_id，不能靠 URL 名称判断网络。
 def _evm(key, cid, name, urls, explorer, dex, llama):
+    """按 EVM 通用字段构造链元数据；Multicall3 地址在 EVM 生态是同一份，直接复用。"""
     return ChainMeta(key, cid, name, BERACHAIN.multicall3, urls, explorer, dex, llama)
 
 

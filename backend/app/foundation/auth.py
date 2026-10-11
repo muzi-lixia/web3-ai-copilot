@@ -19,6 +19,8 @@ from app.core.logging import span, trace_id
 
 @dataclass(frozen=True)
 class Identity:
+    """已认证用户的身份投影：内部 user_id + 会话 ID + 钱包地址（地址不参与 repr）。"""
+
     user_id: str
     session_id: str
     address: str = field(repr=False)
@@ -28,6 +30,7 @@ class AuthService:
     """基础服务唯一身份权威。Agent 通过 HTTP 取得无地址的身份表示。"""
 
     def __init__(self, database, settings):
+        """持有数据库连接层与配置；身份状态全部落在库里，进程内不缓存。"""
         self.db, self.settings = database, settings
 
     async def audit(self, event, status, user_id=None):
@@ -41,7 +44,9 @@ class AuthService:
 
     async def limit(self, key, maximum):
         """数据库原子计数；不同 worker 不会各自放行一份配额。key 不落原始 IP 或钱包。"""
+        # 先哈希成桶名：库里不出现原始 IP 或钱包地址，同一 key 稳定落到同一桶。
         bucket = hashlib.sha256(key.encode()).hexdigest()
+        # 固定 60s 窗口；配合下方 ON CONFLICT 做原子自增，多 worker 共享同一份配额。
         window = int(time.time()) // 60
         async with self.db.sessions.begin() as s:
             count = await s.scalar(
@@ -67,6 +72,7 @@ class AuthService:
             f"Issued At: {now.isoformat()}\nExpiration Time: {expires.isoformat()}"
         )
         async with self.db.sessions.begin() as s:
+            # 每个地址只保留最新一条挑战：重复申请会让旧 nonce 直接作废（防堆积、也防旧消息被复用）。
             await s.execute(
                 text("""INSERT INTO auth_challenges(nonce,address,message,expires_at)
                 VALUES(:n,:a,:m,:e) ON CONFLICT(address) DO UPDATE SET
@@ -103,13 +109,16 @@ class AuthService:
                     if recovered.lower() != row["address"]:
                         raise ValueError("signature mismatch")
                 except Exception:
+                    # 验签失败统一成同一个错误，不区分「挑战不存在」与「签名不匹配」，避免被枚举。
                     raise NonceInvalidError("签名挑战无效，请重新获取并签名") from None
+                # 验签通过才消费挑战：失败时事务整体回滚，挑战保留（可重签直到过期）。
                 await s.execute(text("DELETE FROM auth_challenges WHERE nonce=:n"), dict(n=row["nonce"]))
                 user = await s.scalar(
                     text("""INSERT INTO service_users(id,address) VALUES(:id,:a)
                     ON CONFLICT(address) DO UPDATE SET address=excluded.address RETURNING id"""),
                     dict(id=str(uuid4()), a=row["address"]),
                 )
+                # 同一事务里建登录会话并落刷新凭证摘要；令牌此刻还没离开服务端，失败即整体回滚。
                 sid, refresh = str(uuid4()), secrets.token_urlsafe(48)
                 expires = datetime.now(UTC) + timedelta(days=self.settings.login_session_days)
                 await s.execute(
@@ -125,10 +134,12 @@ class AuthService:
 
     @staticmethod
     def digest(token):
+        """刷新凭证只以 SHA-256 摘要入库，明文不落盘，库泄露也无法直接复用。"""
         return hashlib.sha256(token.encode()).hexdigest()
 
     def tokens(self, user, sid, address, refresh, session_expires):
         """JWT 的 exp 不越过登录会话绝对期限；不会将刷新 token 放入 JWT。"""
+        # JWT 寿命取二者较小值：访问令牌的到期时间不会越过登录会话的绝对期限。
         expires = min(
             datetime.now(UTC) + timedelta(minutes=self.settings.access_token_minutes), session_expires
         )
@@ -160,6 +171,7 @@ class AuthService:
             raise UnauthorizedError("访问凭证已过期，请续期", code="access_expired") from None
         except jwt.InvalidTokenError:
             raise UnauthorizedError("登录凭证无效") from None
+        # 除签名校验外还查会话状态：登出（revoked）或已过期后，即便 JWT 未到期也不能访问业务。
         async with self.db.sessions() as s:
             row = (
                 await s.execute(
@@ -191,6 +203,7 @@ class AuthService:
                 .first()
             )
             if row and row["consumed"]:
+                # 刷新令牌已被用过＝疑似泄露：撤销整个登录会话，强制重新登录。
                 await s.execute(
                     text("UPDATE login_sessions SET revoked=true WHERE id=:s"), dict(s=row["session_id"])
                 )
@@ -208,12 +221,14 @@ class AuthService:
                     row["user_id"], row["session_id"], row["address"], fresh, row["expires_at"]
                 )
                 denied = False
+        # 审计与抛错都放在事务之外：撤销/轮换已经提交，不能被这次抛错回滚掉。
         await self.audit("refresh", "failed" if denied else "success", row["user_id"] if row else None)
         if denied:
             raise UnauthorizedError("续期凭证无效，请重新登录")
         return result
 
     async def logout(self, identity):
+        """吊销当前会话并记审计；吊销即时生效，不等 JWT 自然过期。"""
         async with self.db.sessions.begin() as s:
             await s.execute(
                 text("UPDATE login_sessions SET revoked=true WHERE id=:s"), dict(s=identity.session_id)

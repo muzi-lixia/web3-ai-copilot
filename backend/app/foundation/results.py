@@ -31,7 +31,10 @@ def summary(payload):
 
 
 class ResultService:
+    """资产查询结果的持久化与汇总，所有读写都按 user_id 归属校验。"""
+
     def __init__(self, database, resources):
+        """持有数据库连接层与业务资源（配置、行情缓存）。"""
         self.db, self.resources = database, resources
 
     async def save(self, user, payload):
@@ -47,6 +50,7 @@ class ResultService:
         return summary(payload)
 
     async def get(self, user, result_id):
+        """读本人结果；不存在、已过期或非本人一律 404，不泄露归属信息。"""
         async with self.db.transaction(user) as s:
             row = await s.scalar(
                 text("""SELECT payload FROM asset_results
@@ -62,6 +66,7 @@ class ResultService:
         ids = [chain_id] if chain_id else [c.chain_id for c in CHAINS]
 
         async def read(cid):
+            """查询单条链的资产；代币合约走清单外读取，其余走注册表批量查询。"""
             with span("rpc.balance", chain_id=cid):
                 if symbol and symbol.startswith("0x"):
                     asset = await custom_balance(cid, symbol, identity.address, self.resources)
@@ -174,6 +179,7 @@ class ResultService:
             }
 
     async def delete(self, user, result_ids):
+        """批量删除本人结果；去重后逐条按 id + user_id 删除，非本人的删不掉也不报错。"""
         async with self.db.transaction(user) as session:
             for rid in set(result_ids):
                 await session.execute(

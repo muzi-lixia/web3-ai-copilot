@@ -40,6 +40,11 @@ class JsonFormatter(logging.Formatter):
     """旧日志插值不进入输出，避免业务异常及第三方 SDK 意外输出敏感数据。"""
 
     def format(self, record):
+        """把日志记录渲染成单行 JSON，只保留白名单字段。
+
+        事件名不合法时归为 application.log；字符串字段超过长度或含地址/令牌/URL 一律丢弃，
+        异常只记类型名，不落栈和原文 —— 保证日志里不会意外带出敏感数据。
+        """
         event = str(record.msg)
         if not re.fullmatch(r"[a-z][a-z0-9_.]{0,80}", event):
             event = "application.log"
@@ -53,6 +58,8 @@ class JsonFormatter(logging.Formatter):
             "span_id": span_id.get(),
             "parent_span_id": parent_span_id.get(),
         }
+        # 只接收白名单里的标量字段；字符串一旦超长、或含地址/令牌/URL 就整条丢弃，
+        # 宁可少记也不冒把敏感数据写进日志的风险。
         for key in FIELDS:
             value = getattr(record, key, None)
             if isinstance(value, (str, int, float, bool)):
@@ -62,6 +69,7 @@ class JsonFormatter(logging.Formatter):
                     continue
                 body[key] = value
         if record.exc_info and record.exc_info[0]:
+            # 异常只记类型名，不写栈和原文。
             body["exception_type"] = record.exc_info[0].__name__
         return json.dumps(body, ensure_ascii=False)
 
@@ -78,6 +86,7 @@ def setup_logging(level="INFO"):
 
 
 def get_logger(name):
+    """取标准库 logger；格式化统一由 setup_logging 装配的 root handler 负责。"""
     return logging.getLogger(name)
 
 
@@ -111,12 +120,19 @@ class TraceMiddleware:
     """纯 ASGI 中间件不缓冲 SSE；流结束后才记录整个 HTTP 请求耗时。"""
 
     def __init__(self, app, service="backend"):
+        """记录下游 ASGI 应用与自身服务名，服务名会写进每条日志。"""
         self.app, self.service = app, service
 
     async def __call__(self, scope, receive, send):
+        """为每个 HTTP 请求建立 trace 上下文，并包装 send 以便回写 trace 头、拿到状态码。
+
+        非 HTTP 作用域（如 lifespan）直接透传；上游传入的 trace/parent 头会先做格式校验，
+        不合法就本地新生成，避免被外部注入任意值。
+        """
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         headers = dict(scope.get("headers", []))
+        # 上游 trace/parent 头先做格式校验，不合规就本地新生成，防止外部注入任意值污染链路。
         incoming = headers.get(b"x-trace-id", b"").decode("ascii", errors="ignore")
         parent = headers.get(b"x-parent-span-id", b"").decode("ascii", errors="ignore")
         tokens = [
@@ -128,6 +144,7 @@ class TraceMiddleware:
         started, status = time.monotonic(), 500
 
         async def traced_send(message):
+            """透传响应，并在开始帧补上 trace 头与 no-store，同时抓住真实状态码。"""
             nonlocal status
             if message["type"] == "http.response.start":
                 status = message["status"]
@@ -141,6 +158,7 @@ class TraceMiddleware:
         try:
             await self.app(scope, receive, traced_send)
         finally:
+            # 在 finally 里记整段请求耗时；SSE 流结束时才触发，这条日志代表请求真正收尾。
             get_logger(__name__).info(
                 "http.completed",
                 extra={

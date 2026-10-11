@@ -20,14 +20,25 @@ from app.infrastructure.foundation_client import FoundationClient
 
 
 def postgres_dsn(url):
+    """把配置里的异步 DSN 转成 checkpointer 需要的同步连接串。
+
+    框架的 PostgresSaver 不接受 asyncpg 驱动名，但又需要完整密码，
+    所以这里同时改写 drivername 并关闭密码隐藏。
+    """
     return make_url(url).set(drivername="postgresql").render_as_string(hide_password=False)
 
 
 def create_app(settings=None):
+    """构造 Agent 服务的 FastAPI 实例。
+
+    Agent 是独立部署单元：只连自己的对话库、基础 HTTP 服务和模型，
+    因此依赖全部在这里显式装配并挂在 app.state 上，不使用全局单例。
+    """
     settings = settings or get_settings()
 
     @asynccontextmanager
     async def lifespan(app):
+        """启动时接租约并收尾遗留轮次；关闭时先停任务、再释放客户端与连接池。"""
         setup_logging("DEBUG" if settings.debug else "INFO")
         db = Database(settings.agent_database_url or settings.database_url)
         client = FoundationClient(settings)
@@ -66,6 +77,7 @@ def create_app(settings=None):
 
     @app.get("/health")
     async def health():
+        """存活探针：只说明进程在监听，不探测下游依赖，避免依赖抖动引发反复重启。"""
         return {"code": 0, "msg": "success", "data": {"service": "agent"}}
 
     return app

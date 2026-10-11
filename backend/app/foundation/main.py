@@ -20,6 +20,11 @@ from app.infrastructure.database.session import Database
 
 
 def create_app(services=None):
+    """组装基础服务应用。
+
+    传入 services 时复用它（测试用）；否则自建数据库连接、资源与各服务实例。
+    基础服务的启动/关闭与 Agent、Ollama 完全解耦，无模型也能独立提供业务。
+    """
     settings = services.settings if services else get_settings()
     if services is None:
         db = Database(settings.foundation_database_url or settings.database_url)
@@ -34,9 +39,11 @@ def create_app(services=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        """启动时装配日志并拉起维护任务；关闭时取消维护并释放数据库连接。"""
         setup_logging("DEBUG" if settings.debug else "INFO")
 
         async def maintain():
+            """周期性清理过期挑战、结果与限流桶；单次失败只记日志，不中断循环。"""
             while True:
                 await asyncio.sleep(60)
                 try:

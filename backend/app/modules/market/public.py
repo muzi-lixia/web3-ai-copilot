@@ -83,6 +83,7 @@ async def historical_change(chain, token, current, resources):
 
 
 async def quote(chain_id, symbol, currency, resources):
+    """取单币种行情。价格/市值/成交额按币种汇率换算并统一序列化成字符串，缺值保持 None。"""
     token = select_tokens(chain_id, (symbol,))[0]
     chain = get_chain(chain_id)
     quotes = await get_quotes(chain_id, [symbol], resources=resources)

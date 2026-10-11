@@ -11,16 +11,24 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SafeInput:
+    """真正送进模型的输入快照。
+
+    text 是脱敏后的文本；clarification 非空时表示这个请求根本不该进模型，
+    由调用方直接当作最终回答返回（例如代币合约缺网络）。
+    """
+
     text: str
     clarification: str | None = None
 
 
 # 只匹配明确的地址和密钥形态，不能把代币名中的数字或网络 ID 全部抹掉。
+# 前后加负向边界，避免从更长的十六进制串里截出一段误判。
 ADDRESS = re.compile(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])")
 PRIVATE_KEY = re.compile(r"(?<![a-fA-F0-9])(?:0x)?[a-fA-F0-9]{64}(?![a-fA-F0-9])")
 NUMBER = r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
 CHINESE_AMOUNT = r"[零一二三四五六七八九十百千万亿两点]+"
 # “我有两个问题”等普通说法不当作持仓金额；只有明确余额标签或资产单位才遮蔽。
+# 两条金额规则都保留标签和空白，只把数字换成占位符，尽量不改动原句措辞。
 HOLDING_AMOUNT = re.compile(
     rf"(?P<label>持仓数量(?:是|为)?|余额(?:是|为)?)"
     rf"(?P<space>\s*)(?P<amount>{NUMBER})(?![\d.])"
@@ -29,6 +37,7 @@ OWNED_AMOUNT = re.compile(
     rf"(?P<label>我有|持有|页面显示)(?P<space>\s*)(?P<amount>{NUMBER}|{CHINESE_AMOUNT})"
     rf"(?=\s*(?:个|枚)?\s*(?:[A-Z][A-Z0-9._-]{{1,31}}|代币|美元|人民币|元)(?![A-Za-z0-9]))"
 )
+# 带货币符号或「元/美元/人民币」单位的金额，无条件遮蔽。
 CURRENCY_AMOUNT = re.compile(rf"(?:[$¥￥]\s*{NUMBER}|(?:{NUMBER}|{CHINESE_AMOUNT})\s*(?:美元|人民币|元))")
 
 
@@ -43,6 +52,7 @@ def normalize_query(raw: str, public_contracts: tuple[str, ...] = ()) -> SafeInp
         SafeInput: 保留措辞和语序的模型输入，不生成固定意图模板或问候拦截。
     """
     allowed = {address.lower() for address in public_contracts}
+    # 顺序固定：先密钥（更长更特定）再地址，最后处理金额；白名单里的公开合约地址保持原样。
     text = PRIVATE_KEY.sub("[密钥已隐藏]", raw)
     text = ADDRESS.sub(lambda m: m.group(0) if m.group(0).lower() in allowed else "[地址已隐藏]", text)
     text = HOLDING_AMOUNT.sub(lambda m: m["label"] + m["space"] + "[金额已隐藏]", text)

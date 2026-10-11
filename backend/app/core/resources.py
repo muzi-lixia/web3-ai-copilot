@@ -12,12 +12,14 @@ class BusinessResources:
     __slots__ = ("settings", "market_cache", "apy_cache", "good_rpc")
 
     def __init__(self, settings: Settings):
+        """初始化三类进程内缓存：行情、APY、以及按链探测到可用 RPC 的记录。"""
         self.settings = settings
         self.market_cache: dict[int, Any] = {}
         self.apy_cache: dict[str, Any] = {}
         self.good_rpc: dict[int, str] = {}
 
     def __repr__(self):
+        """固定字符串，避免日志或调试输出把配置与缓存整体展开。"""
         return "BusinessResources()"
 
 
@@ -28,4 +30,5 @@ def default_resources() -> BusinessResources:
 
 
 def resolve_resources(resources: BusinessResources | None) -> BusinessResources:
+    """把「可选传入」的容器资源归一化：传了就用传的，没传才回落到默认单例。"""
     return resources if resources is not None else default_resources()

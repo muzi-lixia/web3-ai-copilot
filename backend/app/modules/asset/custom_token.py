@@ -34,6 +34,7 @@ async def metadata(chain_id, contract, resources):
         raise NotFoundError("合约 checksum 不正确")
 
     def read(w3):
+        """在单条连接上校验合约并读取 decimals/symbol，返回值严格限定在可安全展示范围内。"""
         if not w3.eth.get_code(checksum):
             raise NotFoundError("指定地址不是代币合约")
         token = w3.eth.contract(address=checksum, abi=ABI)
@@ -51,9 +52,11 @@ async def metadata(chain_id, contract, resources):
 
 
 async def balance(chain_id, contract, wallet, resources):
+    """读清单外 ERC20 余额。钱包地址来自已验证身份，合约地址只用于定位资产。"""
     meta = await metadata(chain_id, contract, resources)
 
     def read(w3):
+        """在单条连接上调用 balanceOf，返回未按 decimals 缩放的原始整数。"""
         token = w3.eth.contract(address=meta["contract"], abi=ABI)
         return token.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
 

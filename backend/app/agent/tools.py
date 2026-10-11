@@ -10,39 +10,68 @@ from app.core.logging import span
 
 
 class Arguments(BaseModel):
-    # ToolNode 在执行阶段加入 runtime；当前框架版本会一并交给 Pydantic 校验。
-    # 这里忽略框架注入字段，模型多余参数由 ContextBudget 工具中间件在注入前拒绝。
+    """全部工具参数的共同基类。
+
+    只声明业务字段；runtime 由框架在执行阶段注入，因此这里不能禁止未声明字段，
+    模型多传的业务参数改由 ContextBudget 的 awrap_tool_call 在执行前拒绝。
+    """
+
+    # 忽略框架注入的字段（当前版本会把 runtime 一并交给 Pydantic 校验）；
+    # 模型多传的业务参数由 ContextBudget.awrap_tool_call 在执行前拒绝。
     model_config = ConfigDict(extra="ignore")
 
 
 class ChainArguments(Arguments):
+    """只含可选网络的参数：省略 chain_id 表示不限定网络。"""
+
     chain_id: int | None = Field(default=None, gt=0, description="链 ID，省略查询已支持网络")
 
 
 class OverviewArguments(ChainArguments):
+    """概览类查询参数：网络可选，另加展示货币。
+
+    currency 用 pattern 收窄成两种取值，避免模型传入后端无法换算的货币代码。
+    """
+
     currency: str = Field(default="USD", pattern="^(USD|CNY)$", description="估值计价货币")
 
 
 class BalanceArguments(OverviewArguments):
+    """指定币种的查询参数：在概览参数上追加一个必填符号。"""
+
     symbol: str = Field(
         min_length=1, max_length=64, description="精确币种符号，例如 BERA 或 WBERA；二者不可混用"
     )
 
     @model_validator(mode="after")
     def contract_requires_chain(self):
+        """代币合约脱离网络无法解析，必须在参数阶段拒绝，而不是留给下游报错。"""
         if self.symbol.startswith("0x") and self.chain_id is None:
             raise ValueError("代币合约必须同时指定网络")
         return self
 
 
 class AggregateArguments(Arguments):
+    """汇总参数：只接收结果引用 ID，金额由后端计算，模型填不了。"""
+
     currency: str = Field(default="USD", pattern="^(USD|CNY)$")
     result_ids: list[str] = Field(min_length=1, max_length=10, description="当前对话已产生的结果引用 ID")
 
 
 async def query(runtime, name, payload):
+    """查询类工具的唯一出口：转发基础服务、登记结果引用，只把元数据交给模型。
+
+    Args:
+        runtime: 带可信身份的框架上下文；身份不来自模型参数。
+        name: 工具名，仅用于埋点。
+        payload: 发送给基础服务的业务参数。
+    Returns:
+        基础服务返回的元数据 JSON；真实数值由前端凭 result_id 单独读取。
+    """
+    # 身份与凭证只从 run context 取，不经过任何模型参数。
     context = runtime.context
     with span("tool.completed", tool=name):
+        # 顺序：先向基础服务查询拿到 result_id，再把引用登记到会话，最后把元数据交给模型。
         meta = await context.client.request("POST", "/me/balance-results", context.token, json=payload)
         await context.repository.add_ref(context.user_id, context.conversation_id, meta["result_id"])
         context.results.append(meta)
@@ -86,6 +115,7 @@ async def get_my_token_balance(
         安全元数据和结果引用，不返回余额正文。
     """
     if chain_id is None:
+        # 模型没给网络时用部署默认网络，而不是让下游猜。
         chain_id = runtime.context.client.default_chain_id
     return await query(
         runtime,
@@ -93,6 +123,7 @@ async def get_my_token_balance(
         {
             "chain_id": chain_id,
             "currency": currency,
+            # 合约地址大小写敏感，保持原样；符号统一大写后再去匹配注册表。
             "symbol": symbol.strip() if symbol.startswith("0x") else symbol.strip().upper(),
         },
     )
@@ -151,6 +182,7 @@ async def aggregate_results(result_ids: list[str], runtime: ToolRuntime[RunConte
         汇总状态及新的结果引用；基础服务完成去重和计算。
     """
     c = runtime.context
+    # 汇总前先校验引用归属：这是防止模型编造 result_id 的闸门（模型编得出 ID，编不出归属关系）。
     await c.repository.check_refs(c.user_id, c.conversation_id, result_ids)
     with span("tool.completed", tool="aggregate_results"):
         meta = await c.client.request(
