@@ -142,7 +142,7 @@ def tokens_for(chain_id: int) -> tuple[TokenMeta, ...]:
     """
     tokens = TOKENS_BY_CHAIN.get(chain_id)
     if tokens is None:
-        raise UnsupportedChainError(f"链 {chain_id} 尚未登记 token 清单（见 constants/tokens.py）")
+        raise UnsupportedChainError(f"链 {chain_id} 尚未登记 token 清单")
     return tokens
 
 

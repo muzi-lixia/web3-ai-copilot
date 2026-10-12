@@ -14,6 +14,8 @@ dependencies = [
     "langchain>=1.0,<2.0",
     "langchain-ollama>=1.0,<2.0",
     "langchain-openai>=1.0,<2.0",
+    # 追踪上报给 LangSmith；此前只是 langchain 的传递依赖，显式声明避免被上游版本带偏。
+    "langsmith>=0.14,<1.0",
     "web3>=7.6",
     "pyjwt>=2.15.1",
     # 异步数据库访问、结构迁移与 PostgreSQL 驱动；会话和摘要都使用同一存储。

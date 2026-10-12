@@ -2,8 +2,7 @@
 
 ## 为什么是它
 
-本项目此前取行情用 DexScreener + DefiLlama（按「链标识 + 合约地址」查，加币即一行）。
-**质押的 APY 这两个源都给不出** —— 它不是某个池子的报价，而是协议把 PoL 激励
+**质押的 APY 池子报价类行情源给不出** —— 它不是某个池子的报价，而是协议把 PoL 激励
 回购成 WBERA 注入金库后形成的收益，只有 Berachain 自己算得出来。
 
 Beep 就是 BeraHub 前端调的那个后端（Berachain Event Extraction Pipeline），

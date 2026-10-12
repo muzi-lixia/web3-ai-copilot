@@ -20,6 +20,7 @@ from typing import Literal
 from pydantic import Field, field_serializer
 
 from app.common.schemas import DataQuality, Schema
+from app.common.units import cut_usd
 
 
 class Asset(Schema):
@@ -39,17 +40,24 @@ class Asset(Schema):
         "因为「占比 0%」和「算不出来」是两回事；总额本身为 0 时同样为 null",
     )
 
-    @field_serializer("amount", "price_usd", "value_usd", when_used="json")
-    def _decimal_as_plain_string(self, value: Decimal | None) -> str | None:
-        """序列化成十进制字符串。
+    @field_serializer("amount", when_used="json")
+    def _amount_as_plain_string(self, value: Decimal | None) -> str | None:
+        """代币数量序列化成普通十进制字符串。
 
-        两个原因：
-        1. 这些值是 bigint 归一化/相乘的结果，走 JSON number 会让 JS 的
-           float64 在大额上掉精度（0.1 wei 级的差错会在累加后放大）。
-        2. `format(value, "f")` 强制普通小数写法。直接 str(Decimal) 对极小的数
-           会输出 `1E-18` 这种科学计数法，前端会原样显示出来。
+        `format(value, "f")` 强制普通小数写法：直接 str(Decimal) 对极小的数
+        会输出 `1E-18` 这种科学计数法，前端会原样显示出来。数量不截位 ——
+        它是代币数量（18 位精度是常态），不是 USD 金额。
         """
         return None if value is None else format(value, "f")
+
+    @field_serializer("price_usd", "value_usd", when_used="json")
+    def _usd_as_plain_string(self, value: Decimal | None) -> str | None:
+        """USD 金额序列化成普通十进制字符串，并截断到 6 位。
+
+        走 JSON number 会让 JS 的 float64 在大额上掉精度，所以始终是字符串；
+        位数规则见 `app.common.units.cut_usd`（全项目唯一截断点）。
+        """
+        return cut_usd(value)
 
 
 class WalletAssets(DataQuality):
@@ -80,3 +88,8 @@ class WalletAssets(DataQuality):
     )
     stale: bool = Field(default=False, description="行情降级到过期缓存时为 true")
     computed_at: datetime
+
+    @field_serializer("total_value_usd", when_used="json")
+    def _total_as_plain_string(self, value: Decimal) -> str:
+        """合计同样走 USD 的 6 位截断，规则与逐条估值一致。"""
+        return cut_usd(value)

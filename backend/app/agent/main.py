@@ -1,5 +1,6 @@
 """Agent 单独部署入口。只连接自己的对话数据库、基础 HTTP 服务和模型。"""
 
+import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -28,6 +29,21 @@ def postgres_dsn(url):
     return make_url(url).set(drivername="postgresql").render_as_string(hide_password=False)
 
 
+def enable_tracing(settings):
+    """把追踪配置写进进程环境：langsmith 只读环境变量，不经过这里的 Settings。
+
+    必须在任何 LangChain 调用之前执行 —— langsmith 读取环境变量带 lru_cache，
+    一旦先读过一次空值，之后再设也不会生效，且不会有任何报错。
+    留空 key 即不打开开关，本地开发与测试不产生任何外发。
+    """
+    key = settings.langsmith_api_key.get_secret_value()
+    if not key:
+        return
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGSMITH_API_KEY"] = key
+    os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
+
+
 def create_app(settings=None):
     """构造 Agent 服务的 FastAPI 实例。
 
@@ -40,6 +56,7 @@ def create_app(settings=None):
     async def lifespan(app):
         """启动时接租约并收尾遗留轮次；关闭时先停任务、再释放客户端与连接池。"""
         setup_logging("DEBUG" if settings.debug else "INFO")
+        enable_tracing(settings)
         db = Database(settings.agent_database_url or settings.database_url)
         client = FoundationClient(settings)
         client.default_chain_id = settings.default_chain_id

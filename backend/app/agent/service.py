@@ -11,29 +11,35 @@ from uuid import uuid4
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain_core.messages import HumanMessage
-from langsmith import tracing_context
 
 from app.agent.context import RunContext
-from app.agent.memory import ContextBudget
+from app.agent.middleware import ContextBudget, LiveDataFilter
 from app.agent.models import chat_model, select_settings
 from app.agent.tools import TOOLS
-from app.core.exceptions import AppError, RateLimitError
+from app.core.exceptions import AppError, NotFoundError, RateLimitError
 from app.core.logging import get_logger, span
 
-PROMPT = """你是只读 Web3 助手，只回答 Berachain 上本人资产与公开行情相关的问题。
+PROMPT = """你是只读 Web3 助手，只回答本人资产与公开行情相关的问题。
 规则：
 1. 所有链上资产、合约数据必须调用工具获取，禁止编造数据。
 2. 不能自动执行转账、授权等任何链上交易；仅可讲解操作步骤与风险。
-3. 调用工具前检查参数。钱包已由基础服务绑定，不索取也不填写钱包地址；
-   没有指定币种时按整体持仓一次查完，不追问币种；没指定网络用默认网络，不追问。
-   「我有多少钱」「我有多少资产」问的是本人持仓，按整体持仓查询；
-   「BERA 多少钱」这类没提「我的」才按公开行情理解。BERA 与 WBERA 是不同币种，不混用。
-4. 仔细阅读工具描述，按适用场景选择工具，不选错工具。
-5. 工具只返回元数据，具体数字以界面上的结果卡片为准，不在正文里复述。
+3. 缺省与歧义处理：
+   - 调用工具前先检查参数。钱包已由基础服务绑定，不索取也不填写钱包地址。
+   - 没有指定币种时，按整体持仓一次查完，不追问币种。
+   - 没指定网络时使用默认网络，不追问。
+   - 「我有多少钱」「我有多少资产」问的是本人持仓，按整体持仓查询。
+   - 「BERA 多少钱」这类没提「我的」才按公开行情理解。
+   - BERA 与 WBERA 是不同币种，不混用。
+4. 工具选择：先根据问题判断是本人持仓还是公开行情，再阅读工具描述并按适用场景选择工具，不选错工具。
+5. 正文用自然语言说明本次结果：查到什么、金额多少、数据截止时间。所有金额、数量、时间
+   必须逐字引用工具返回值，不四舍五入、不换算货币、不自行计算；工具没返回的数字不要补。
 6. 不提供投资建议；拒绝讲解盗币、合约攻击等违规内容。
 7. 不诱导用户泄露私钥、助记词。
-每次问最新余额都重新获取，不复用旧结果；没查过的结论先查再答。
+每次问最新余额或行情都重新调用工具，不复用旧结果；对话历史里出现过的数值不是当前数据；
+没查过的结论先查再答。
 输入的[地址已隐藏]、[密钥已隐藏]、[金额已隐藏]是隐私占位符，不猜测、不还原。
 问候自然回应并简述能做什么；超出范围的请求直接说明只读范围，不多解释。"""
 
@@ -61,6 +67,10 @@ class ChatService:
         self.last_cleanup = 0
         # 只保护「受理」临界区（查重 + 建轮次 + 登记任务），不覆盖生成过程。
         self.accept_lock = asyncio.Lock()
+        # 本进程内的订阅者：tid -> 等待新正文的队列。生成与订阅同进程才有效，
+        # 当前部署是单进程（--workers 1 + 租约）所以成立；换多进程后这里会静默没人收到，
+        # 订阅端仍有数据库基线兜底，不会丢结果。
+        self.live = {}
 
     async def start(self):
         """接部署租约，并收尾上次进程遗留的 queued/running 轮次。
@@ -151,9 +161,31 @@ class ChatService:
         终态；写失败就登记待补写交给维护任务重试，不能让订阅端永远等一个不会到来的结果。
         """
         # 默认终态是 failed：任何没有显式置为 completed 的路径都不会被误当成成功。
-        answer, state, error, usage = "", "failed", None, {}
+        answer, state, error = "", "failed", None
+        # 按模型调用 id 收集用量：一次调用的分片共享 id，只在收尾分片带用量，
+        # 同 id 取最后一次即为该次总量，多轮工具调用不会被最后一次覆盖。
+        usage_by_call: dict[str | None, tuple[int, int]] = {}
         context = RunContext(user, cid, token, self.client, self.repository)
-        with span("turn.completed", turn_id=tid), tracing_context(enabled=False):
+
+        async def persist_results():
+            """工具产出结果后立即落库，并唤醒订阅端重读 —— 卡片不必等 1 秒刻度。
+
+            正文传当前累计值：update 是整列覆盖，传空串会把已经流出的正文抹掉。
+            顺序固定为「先落库（事务提交）→ 再广播」，否则通知先到、数据还没提交。
+            """
+            try:
+                await self.repository.update(
+                    user, tid, answer, "running", context.results, tool_trace=context.tool_calls
+                )
+            except Exception:
+                # 即时落库只是把刻度提前，失败不能拖垮这一轮：
+                # 1 秒刻度与终态写库仍会兜住，必要时还有待补写队列。
+                get_logger(__name__).exception("turn.persist_early_failed", extra={"turn_id": tid})
+                return
+            self.broadcast(tid, None)
+
+        context.persist = persist_results
+        with span("turn.completed", turn_id=tid):
             try:
                 settings = select_settings(self.settings, await self.repository.model_provider(user, cid))
                 # 排队等模型额度（不是执行超时）：等不到就抛 TimeoutError，走下面的兜底分支。
@@ -178,7 +210,13 @@ class ChatService:
                                     context_schema=RunContext,
                                     checkpointer=self.checkpointer,
                                     middleware=[
+                                        LiveDataFilter(),
                                         ContextBudget(settings),
+                                        # 步数上限用 "error"：撞上限直接抛错中止，绝不静默收尾。
+                                        # 抛出的两个 *ExceededError 在下面单独映射成 agent_step_limit，
+                                        # 不会和 model_unavailable 混为一谈。
+                                        # 试过 "end"（收尾返回已有结果），但正文可能只写半句却显示
+                                        # 「完成」，坏得无声、排查无从下手，故改回 "error"。
                                         ModelCallLimitMiddleware(
                                             run_limit=self.settings.agent_model_call_limit,
                                             exit_behavior="error",
@@ -192,8 +230,14 @@ class ChatService:
                                 config = {
                                     "configurable": {"thread_id": cid},
                                     "recursion_limit": self.settings.agent_model_call_limit * 4 + 8,
+                                    # 上报到 LangSmith 时的标识：按轮次命名并带上会话与轮次 id，
+                                    # 前端给出的那一轮可以直接在平台上按 id 搜到。
+                                    "run_name": "copilot.turn",
+                                    "metadata": {"turn_id": tid, "session_id": cid},
                                 }
-                                tick = time.monotonic()
+                                tick = push = time.monotonic()
+                                # 增量推送节拍：比落库节流细得多，又不用每个 token 都发一帧。
+                                stream_seconds = self.settings.copilot_stream_seconds
                                 # aclosing 保证循环提前退出（超时/异常）时关闭异步生成器，释放底层连接。
                                 async with aclosing(
                                     agent.astream(
@@ -204,19 +248,23 @@ class ChatService:
                                     )
                                 ) as source:
                                     async for message, _ in source:
-                                        # 只累计纯文本块：带 tool_call_chunks 的块里是「边说边调工具」的内容，
-                                        # 计入正文会把工具调用片段混进回答。
-                                        if message.type == "AIMessageChunk" and not message.tool_call_chunks:
-                                            answer += str(message.text)
+                                        if message.type == "AIMessageChunk":
+                                            # 用量与正文无关：每次模型调用的收尾分片带用量，
+                                            # 即使这一轮是去调工具也要记，否则多轮用量会漏掉前几步。
                                             if message.usage_metadata:
-                                                usage = {
-                                                    "prompt_tokens": message.usage_metadata.get(
-                                                        "input_tokens", 0
-                                                    ),
-                                                    "completion_tokens": message.usage_metadata.get(
-                                                        "output_tokens", 0
-                                                    ),
-                                                }
+                                                usage_by_call[message.id] = (
+                                                    message.usage_metadata.get("input_tokens", 0),
+                                                    message.usage_metadata.get("output_tokens", 0),
+                                                )
+                                            # 只累计纯文本块：带 tool_call_chunks 的块是
+                                            # 「边说边调工具」的内容，计入会把调用片段混进回答。
+                                            if not message.tool_call_chunks:
+                                                answer += str(message.text)
+                                                # 增量推送：把累计正文广播给本进程的订阅者，
+                                                # 速度由 stream_seconds 决定，与落库节流无关。
+                                                if time.monotonic() - push >= stream_seconds:
+                                                    self.broadcast(tid, answer)
+                                                    push = time.monotonic()
                                         # 落库节流：每 snapshot_seconds 才写一次全量正文，
                                         # 避免每个 token 都触发一次 UPDATE。
                                         if time.monotonic() - tick >= self.settings.copilot_snapshot_seconds:
@@ -252,11 +300,22 @@ class ChatService:
             except AppError as exc:
                 # 业务错误直接暴露错误码；文案由统一错误处理器映射，避免这里重复维护。
                 error = exc.code
+            except (ModelCallLimitExceededError, ToolCallLimitExceededError):
+                # 撞步数上限是额度耗尽，不是模型故障：单独给码，不落进下面的兜底。
+                error = "agent_step_limit"
             except Exception:
                 # 兜底（多为模型服务不可用）：对外只给安全错误码，详情仅进日志。
                 error = "model_unavailable"
                 get_logger(__name__).exception("turn.failed", extra={"turn_id": tid})
             finally:
+                usage = (
+                    dict(
+                        prompt_tokens=sum(prompt for prompt, _ in usage_by_call.values()),
+                        completion_tokens=sum(completion for _, completion in usage_by_call.values()),
+                    )
+                    if usage_by_call
+                    else {}
+                )
                 get_logger(__name__).info(
                     "turn.state", extra={"turn_id": tid, "status": state, "error_code": error, **usage}
                 )
@@ -276,6 +335,14 @@ class ChatService:
                     # 登记待补写交给维护任务重试，否则订阅端会永远等一个不会到来的终态。
                     self.pending[tid] = (user, values)
                     get_logger(__name__).exception("turn.persistence_pending", extra={"turn_id": tid})
+                # 终态已定：补发最后一段正文，再通知订阅者立即重读 —— 不必等下一个 1 秒刻度。
+                self.broadcast(tid, answer)
+                self.broadcast(tid, None)
+
+    async def authorize(self, user, tid):
+        """订阅前的归属校验；不拥有就按不存在处理，不暴露他人轮次是否存在。"""
+        if not await self.repository.owns(user, tid):
+            raise NotFoundError("轮次不存在")
 
     async def snapshot(self, user, tid):
         """读取一轮的展示快照，并标注终态是否尚未补写成功。"""
@@ -285,39 +352,91 @@ class ChatService:
         value["persistence_pending"] = tid in self.pending
         return value
 
-    async def events(self, user, tid, token):
-        """每秒读一个持久化快照，断线不取消生成；有变化才发送，超时发心跳。
+    def broadcast(self, tid, text):
+        """把本轮累计正文推给本进程的订阅者；text 为 None 表示库里有新内容。
 
+        只在生成进程与订阅进程相同时送达。换多进程部署后这里会静默地没人收到，
+        此时订阅端仍按数据库基线工作（只是退回秒级台阶），不会丢结果也不报错。
+        """
+        for queue in self.live.get(tid, ()):
+            try:
+                queue.put_nowait(text)
+            except asyncio.QueueFull:
+                # 订阅者没跟上：先丢掉它还没读走的旧帧，再放最新一帧。
+                # 帧里是累计全量正文，丢中间帧不丢内容。
+                queue.get_nowait()
+                queue.put_nowait(text)
+
+    @staticmethod
+    def frames(value, refs=True):
+        """把一份快照翻译成待发送的帧；有结果时补一帧 result_ref。
+
+        事件名沿用三态语义，但 payload 始终是全量快照（不是增量），前端按整条替换。
+        refs=False 用于增量帧：结果块没变，不必每帧重复发一遍。
+        """
+        active = value["status"] in ("queued", "running") or value["persistence_pending"]
+        kind = "status" if value["status"] == "queued" else "text_delta" if active else "done"
+        frames = [dict(type=kind, **value)]
+        if refs and value["message"].get("results"):
+            # 有结果时额外发一帧，前端据此把数据卡片挂到对应回答上。
+            frames.insert(0, dict(type="result_ref", **value))
+        return frames
+
+    async def events(self, user, tid, token):
+        """订阅一轮的展示流：数据库基线 + 生成进程内的增量推送，断线不取消生成。
+
+        数据库仍是权威与兜底（断线重连、跨进程、终态都读它），但生成期间不再只靠
+        每秒轮询 —— 生成器把累计正文直接广播给本进程的订阅者，消掉 1 秒台阶。
         不保存 token 事件历史，重连直接返回最新文本和引用，不重复执行工具。
         连接存续期间再次验证登录会话，登出之后停止提供数据。
         """
-        # version 从 -1 起步：保证第一帧一定发出，哪怕库里 version 恰好是 0。
-        version, heartbeat = -1, time.monotonic()
-        while True:
-            # 每次推送前复查租约与登录会话：登出或换实例后立即停止供数。
-            await self.lease.verify()
-            await self.client.identity(token)
-            value = await self.snapshot(user, tid)
-            active = value["status"] in ("queued", "running") or value["persistence_pending"]
-            # revision 把 version 与待补写标志打包：补写完成（标志翻转）也算一次变化，需要再推一帧。
-            revision = (value["version"], value["persistence_pending"])
-            if revision != version:
-                kind = "status" if value["status"] == "queued" else "text_delta" if active else "done"
-                if value["message"].get("result_refs"):
-                    # 有结果引用时额外发一帧，前端据此把数据卡片挂到对应回答上。
-                    yield dict(type="result_ref", **value)
-                # 事件名沿用三态语义，但 payload 始终是全量快照（不是增量），前端按整条替换。
-                yield dict(type=kind, **value)
-                version = revision
-            if not active:
-                # 已是终态且无待补写：推完最后一帧就结束流，客户端不必自己判断何时断开。
-                return
-            if time.monotonic() - heartbeat >= 15:
-                # 15s 心跳：保活中间代理，也让前端能区分「安静」和「连接已死」。
-                yield {"type": "ping"}
-                heartbeat = time.monotonic()
-            # 轮询间隔与落库节流同量级，避免无意义的空读。
-            await asyncio.sleep(1)
+        # 先登记队列再读库：反过来的话，「读库完成 → 登记」之间推送的帧会被丢掉。
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        watchers = self.live.setdefault(tid, set())
+        watchers.add(queue)
+        # version 从 None 起步：保证第一帧一定发出，哪怕库里还停在初始版本。
+        version, heartbeat, read_at = None, time.monotonic(), 0.0
+        try:
+            while True:
+                # 数据库基线按秒读：增量帧不改变库里的 version，不能每来一帧就读一次库。
+                # 复查租约与登录会话也放在这一档 —— 它们是远端调用，不能按帧的频率打。
+                if time.monotonic() - read_at >= 1:
+                    # 登出或换实例后立即停止供数。
+                    await self.lease.verify()
+                    await self.client.identity(token)
+                    value = await self.snapshot(user, tid)
+                    # revision 把 version 与待补写标志打包：补写完成（标志翻转）也算一次变化。
+                    revision = (value["version"], value["persistence_pending"])
+                    if revision != version:
+                        for frame in self.frames(value):
+                            yield frame
+                        version = revision
+                    if value["status"] not in ("queued", "running") and not value["persistence_pending"]:
+                        # 已是终态且无待补写：推完最后一帧就结束流，客户端不必自己判断何时断开。
+                        return
+                    read_at = time.monotonic()
+                # 等增量帧：拿到就贴进最新快照发出去；超时就回顶部，到点会读库、到点会发心跳。
+                try:
+                    text = await asyncio.wait_for(queue.get(), timeout=1)
+                except TimeoutError:
+                    if time.monotonic() - heartbeat >= 15:
+                        # 15s 心跳：保活中间代理，也让前端能区分「安静」和「连接已死」。
+                        yield {"type": "ping"}
+                        heartbeat = time.monotonic()
+                    continue
+                if text is None:
+                    # 终态已落库的信号：立即重读，不必等下一个 1 秒刻度。
+                    read_at = 0.0
+                    continue
+                if text != value["message"]["content"]:
+                    live = {**value, "message": {**value["message"], "content": text}}
+                    for frame in self.frames(live, refs=False):
+                        yield frame
+        finally:
+            # 订阅结束必须摘除队列，否则生成器会一直往没人读的队列里推、且永不释放。
+            watchers.discard(queue)
+            if not watchers:
+                self.live.pop(tid, None)
 
     async def cancel(self, user, tid):
         """停止一轮生成；没有内存任务（孤儿轮次）时按当前状态返回，不报错。

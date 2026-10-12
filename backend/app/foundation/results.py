@@ -2,12 +2,13 @@
 
 import asyncio
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from uuid import uuid4
 
 from sqlalchemy import text
 
+from app.common.units import cut_usd
 from app.core.exceptions import AppError, NotFoundError
 from app.core.logging import span
 from app.infrastructure.blockchain.chains import CHAINS
@@ -16,17 +17,61 @@ from app.modules.asset.custom_token import balance as custom_balance
 
 
 def summary(payload):
-    """字段白名单投影，不递归复制资产对象，避免余额或地址流入模型和 Checkpoint。"""
+    """给模型的摘要：带本次结果的真实数值，但只到「值多少」，不含地址与代币合约。
+
+    结果描述改由模型用自然语言生成，所以金额与余额必须让模型看到；
+    地址与合约明文仍然剥离 —— 模型需要的是「查到什么、值多少」，不是「在哪里」。
+    USD 位数已在序列化出口（`cut_usd`）固定成 6 位，这里直接透传。
+    """
     return {
         "result_id": payload["id"],
+        "kind": payload.get("kind", "balance"),
+        "scope": payload["scope"],
+        "currency": payload["currency"],
+        "total_value": payload["total_value"],
+        "holdings": [
+            {
+                "chain": chain["chain_name"],
+                "symbol": asset["symbol"],
+                "amount": asset["amount"],
+                "value_usd": asset["value_usd"],
+            }
+            for chain in payload["chains"]
+            for asset in chain["assets"]
+        ],
+        "unpriced": [asset["symbol"] for asset in payload["unpriced"]],
         "isComplete": payload["isComplete"],
         "failed_chains": payload["failed_chains"],
-        "currency": payload["currency"],
-        "symbols": sorted({a["symbol"] for c in payload["chains"] for a in c["assets"]}),
-        "unpriced_count": len(payload["unpriced"]),
-        "chain_ids": [c["chain_id"] for c in payload["chains"]],
         "queriedAt": payload["queriedAt"],
-        "scope": payload["scope"],
+    }
+
+
+def _hhmmss(iso: str) -> str:
+    """快照时间转固定 UTC+8 的 HH:MM:SS，供后端组装的来源描述使用。
+
+    不读本机时区：同一份结果在不同机器上必须给出同一个串，否则快照不可复现。
+    """
+    try:
+        return datetime.fromisoformat(iso).astimezone(timezone(timedelta(hours=8))).strftime("%H:%M:%S")
+    except ValueError:
+        return iso
+
+
+def envelope(kind, record, *, source_desc):
+    """结果的通用外壳：只放跨类型字段，业务数据一律进 body。
+
+    failed 用 {type, ref} 表达，而不是只放链 ID —— 将来失败的可能是一次行情源或一份文档，
+    信封不该随「失败的是什么」而改形状。
+    """
+    return {
+        "result_id": record["id"],
+        "kind": kind,
+        "status": "complete" if record["isComplete"] else "partial",
+        "queriedAt": record["queriedAt"],
+        "currency": record["currency"],
+        "sources": record.get("sources") or [],
+        "failed": [{"type": "chain", "ref": cid} for cid in record["failed_chains"]],
+        "source_desc": source_desc,
     }
 
 
@@ -38,16 +83,48 @@ class ResultService:
         self.db, self.resources = database, resources
 
     async def save(self, user, payload):
-        """提交真实结果后才公开 ID；保存失败不能发送看似成功的数据卡片。"""
-        payload = {**payload, "id": str(uuid4())}
+        """提交真实结果后才公开 ID；保存失败不能发送看似成功的数据卡片。
+
+        返回落库后的完整记录（含 id）：调用方据此再投影出「给模型的摘要」与「给前端的结果」。
+        """
+        record = {**payload, "id": str(uuid4())}
         expires = datetime.now(UTC) + timedelta(hours=self.resources.settings.conversation_ttl_hours)
         async with self.db.transaction(user) as s:
             await s.execute(
                 text("""INSERT INTO asset_results(id,user_id,payload,expires_at)
                 VALUES(:id,:u,CAST(:p AS jsonb),:e)"""),
-                dict(id=payload["id"], u=user, p=json.dumps(payload), e=expires),
+                dict(id=record["id"], u=user, p=json.dumps(record), e=expires),
             )
-        return summary(payload)
+        return record
+
+    @staticmethod
+    def result(record):
+        """把落库记录投影成下发给前端的结果：信封 + body。
+
+        body 是资产查询的业务数据（链、明细、合计、未计价），信封只承担跨类型字段；
+        **新增 kind 要动两处**：这里加一个 body 分支，前端 `ResultCard` 也要补一支分发 ——
+        漏了会落进兜底分支、把原始 JSON 摊在卡片上（aggregate 就这么出现过一次）。
+        """
+        kind = record.get("kind", "balance")
+        chains = record["chains"]
+        desc = f"{len(chains)} 条网络 balanceOf · 快照 {_hhmmss(record['queriedAt'])}"
+        if kind == "aggregate":
+            desc += f" · 合并 {len(record.get('sources') or [])} 份结果"
+        body = {
+            "scope": record["scope"],
+            "chains": chains,
+            "total_value": record["total_value"],
+            "unpriced": record["unpriced"],
+        }
+        # 非 USD 计价才附带原始 USD 合计与汇率日期，避免 USD 查询下出现同义重复字段。
+        for extra in ("total_value_usd", "exchange_rate_date"):
+            if extra in record:
+                body[extra] = record[extra]
+        return {**envelope(kind, record, source_desc=desc), "body": body}
+
+    async def read(self, user, result_id):
+        """读本人结果并投影成信封 + body，供展示接口直接下发（不再让前端二次拼装）。"""
+        return self.result(await self.get(user, result_id))
 
     async def get(self, user, result_id):
         """读本人结果；不存在、已过期或非本人一律 404，不泄露归属信息。"""
@@ -105,8 +182,12 @@ class ResultService:
             raise UpstreamError("所有查询网络均不可用，请稍后重试")
         payload = self.compose(chains, failed)
         payload["scope"] = "specified_token" if symbol else "registered_tokens"
+        payload["kind"] = "balance"
         payload = await self.convert(payload, currency)
-        return await self.save(identity.user_id, payload)
+        record = await self.save(identity.user_id, payload)
+        # 一次查询同时产出两份投影：给模型的数值摘要（含金额，不含地址与合约）
+        # 与给前端的结果（含业务数据与来源描述）。
+        return {"summary": summary(record), "result": self.result(record)}
 
     @staticmethod
     def compose(chains, failed, *, sources=None):
@@ -126,7 +207,7 @@ class ResultService:
         return dict(
             chains=chains,
             currency="USD",
-            total_value=format(total, "f"),
+            total_value=cut_usd(total),
             unpriced=unpriced,
             isComplete=complete,
             failed_chains=sorted(set(failed)),
@@ -158,8 +239,10 @@ class ResultService:
         )
         if any(not r["isComplete"] for r in records):
             payload["isComplete"] = False
+        payload["kind"] = "aggregate"
         payload = await self.convert(payload, currency)
-        return await self.save(user, payload)
+        record = await self.save(user, payload)
+        return {"summary": summary(record), "result": self.result(record)}
 
     async def convert(self, payload, currency):
         """统一内部按 USD 保存各资产估值；展示总额可转 CNY，汇总不重复转换。"""
@@ -173,7 +256,7 @@ class ResultService:
             return {
                 **payload,
                 "total_value_usd": payload["total_value"],
-                "total_value": format(Decimal(payload["total_value"]) * rate, "f"),
+                "total_value": cut_usd(Decimal(payload["total_value"]) * rate),
                 "currency": currency,
                 "exchange_rate_date": date,
             }

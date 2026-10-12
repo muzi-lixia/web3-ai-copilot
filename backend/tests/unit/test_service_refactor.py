@@ -100,6 +100,7 @@ def make_result(value, contract="0x" + "2" * 40, at="2026-10-10T10:00:00Z"):
         "id": value,
         "currency": "USD",
         "chains": [chain],
+        "total_value": value,
         "isComplete": True,
         "failed_chains": [],
         "queriedAt": at,
@@ -115,18 +116,23 @@ async def test_aggregate_uses_latest_asset_once_and_preserves_failure():
     fresh["failed_chains"] = [1]
     service = ResultService(None, None)
     service.get = AsyncMock(side_effect=[old, fresh])
-    service.save = AsyncMock(side_effect=lambda user, payload: payload)
-    result = await service.aggregate("u", ["a", "b"])
-    assert result["total_value"] == "125"
-    assert not result["isComplete"] and result["failed_chains"] == [1]
-    assert len(result["sources"]) == 2
+    service.save = AsyncMock(side_effect=lambda user, payload: {**payload, "id": "agg1"})
+    projected = await service.aggregate("u", ["a", "b"])
+    # 汇总同样产出两份投影：给模型的摘要（含合计）与给前端的结果（含来源）。
+    assert projected["summary"]["total_value"] == "125"
+    assert projected["summary"]["isComplete"] is False
+    assert projected["summary"]["failed_chains"] == [1]
+    assert len(projected["result"]["sources"]) == 2
 
 
-def test_metadata_projection_cannot_copy_amounts():
+def test_metadata_projection_carries_amounts_without_addresses():
+    """数值必须进模型（结果描述由模型生成），地址与代币合约仍不进。"""
     payload = make_result("123456.789")
-    safe = json.dumps(summary(payload))
-    assert "123456.789" not in safe.replace('"result_id": "123456.789"', "")
-    assert "amount" not in safe and "address" not in safe and "value_usd" not in safe
+    projected = summary(payload)
+    assert projected["total_value"] == "123456.789"
+    assert projected["holdings"][0]["value_usd"] == "123456.789"
+    safe = json.dumps(projected)
+    assert "address" not in safe and "0x" + "2" * 40 not in safe
 
 
 class QueryModel(BaseChatModel):
@@ -155,13 +161,13 @@ class QueryModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-async def test_real_langchain_tool_loop_only_sees_metadata():
-    client = SimpleNamespace(
-        request=AsyncMock(
-            return_value={"result_id": "r1", "isComplete": True, "symbols": ["BERA"], "unpriced_count": 0}
-        ),
-        default_chain_id=80094,
-    )
+async def test_real_langchain_tool_loop_sees_values_not_credentials():
+    """给模型的是数值摘要：金额可见，凭证与地址仍不可见。"""
+    meta = {
+        "summary": {"result_id": "r1", "total_value": "12.38", "isComplete": True, "holdings": []},
+        "result": {"result_id": "r1", "kind": "balance", "status": "complete", "body": {}},
+    }
+    client = SimpleNamespace(request=AsyncMock(return_value=meta), default_chain_id=80094)
     repository = SimpleNamespace(add_ref=AsyncMock())
     context = RunContext("u", "c", "private-token", client, repository)
     agent = create_agent(QueryModel(), tools=TOOLS, context_schema=RunContext, checkpointer=InMemorySaver())
@@ -173,4 +179,5 @@ async def test_real_langchain_tool_loop_only_sees_metadata():
     client.request.assert_awaited_once()
     assert context.results[0]["result_id"] == "r1"
     serialized = json.dumps([m.model_dump(mode="json") for m in result["messages"]], ensure_ascii=False)
-    assert "private-token" not in serialized and "value_usd" not in serialized
+    assert "12.38" in serialized
+    assert "private-token" not in serialized and "0x" not in serialized

@@ -242,6 +242,88 @@ export interface RiskReport extends DataQuality {
 export interface ChatSession {
   id: string
 }
+
+/* Result：一次回答里随消息下发的业务结果。信封（所有 kind 通用）+ body（按 kind 判别）。 */
+
+/** 结果种类；加新类型要动三处：这里、body、前端 ResultCard 的分发（漏了会落进兜底渲染）。 */
+export type ResultKind = 'balance' | 'price' | 'aggregate'
+export type ResultStatus = 'complete' | 'partial' | 'failed'
+
+/** 信封：只放跨类型字段，业务数据一律在 body 里。 */
+export interface ResultEnvelope {
+  result_id: string
+  kind: string
+  status: ResultStatus
+  queriedAt: string
+  currency?: string | null
+  /** 数据来源（源名 + 时间）；余额结果暂未按源记录，行情结果有。 */
+  sources?: { name: string | null; at?: string | null }[]
+  /** 失败项；目前 type 只有 chain、ref 即链 ID；按 type 分派是给将来别的失败物留位。 */
+  failed?: { type: string; ref: number | string }[]
+  /** 后端组装的来源描述，不是模型生成、也不该在前端拼。 */
+  source_desc?: string | null
+}
+
+/** 余额类 body：链级明细 + 合计 + 未计价。 */
+export interface BalanceBody {
+  scope: string
+  chains: Omit<WalletAssets, 'address'>[]
+  total_value: string
+  total_value_usd?: string
+  unpriced: { chain_id: number; symbol: string; contract: string | null }[]
+  exchange_rate_date?: string
+}
+
+/** 公开行情报价（/markets/prices 的返回体，也是 price body 的 token 字段）。 */
+export interface MarketQuote {
+  symbol: string
+  chain_id: number
+  currency: string
+  price: string
+  market_cap?: string | null
+  volume_24h?: string | null
+  change_24h?: number | null
+  change_7d?: string | null
+  updated_at?: string
+  source?: string
+  stale?: boolean
+  exchange_rate_date?: string | null
+  queriedAt?: string
+}
+
+/** 行情类 body。 */
+export interface PriceBody {
+  chain_id: number
+  token: MarketQuote
+}
+
+export interface BalanceResult extends ResultEnvelope { kind: 'balance'; body: BalanceBody }
+export interface PriceResult extends ResultEnvelope { kind: 'price'; body: PriceBody }
+/** 合并结果：后端把多份余额结果合成一条，body 与余额完全同构，前端复用同一套渲染。 */
+export interface AggregateResult extends ResultEnvelope { kind: 'aggregate'; body: BalanceBody }
+/** 走「链级明细」渲染的结果种类；新增同构 kind 要同时扩这里和 isBalanceLike 守卫，渲染组件不动。 */
+export type BalanceLikeResult = BalanceResult | AggregateResult
+/**
+ * 消息里下发的结果。刻意不用判别联合：未知 kind 也要能落到同一个类型上，
+ * 前端按 kind 走守卫（isBalanceLike / isPrice），不认识的一律兜底渲染。
+ */
+export type CopilotResult = ResultEnvelope & { kind: string; body: unknown }
+
+/** 一次工具调用的元信息：工具名、参数、耗时、状态。 */
+export interface ToolCallMeta {
+  tool: string
+  args?: Record<string, unknown>
+  duration_ms?: number
+  status?: string
+  error_code?: string
+}
+/** 整轮的工具调用元信息；与单条结果是一对多，所以不塞进结果里。 */
+export interface ToolMeta {
+  calls: ToolCallMeta[]
+  total_duration_ms: number
+  trace_id?: string | null
+}
+
 /** 数据库消息的稳定 ID 和会话内顺序；流中更新覆盖同一条 assistant 消息。 */
 export interface ChatMessage {
   id: string
@@ -252,8 +334,10 @@ export interface ChatMessage {
   status: string
   /** 提问时刻；历史与快照共用同一个值，格式为 ISO 8601。 */
   created_at?: string
-  result_refs?: { result_id: string; isComplete: boolean; scope?: string; chain_ids?: number[];
-    symbols?: string[]; unpriced_count?: number; queriedAt?: string; currency?: string }[]
+  /** 本轮的业务结果，随消息下发，前端不再单独请求。 */
+  results?: CopilotResult[]
+  /** 本轮工具调用元信息（工具名 / 耗时 / trace），整轮一份。 */
+  tool_meta?: ToolMeta
 }
 /** 一页历史加恢复信息；active_turn_id 不为空时继续订阅后台生成。 */
 export interface MessagePage {

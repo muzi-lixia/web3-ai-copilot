@@ -8,16 +8,19 @@ import { useEffect, useRef, useState } from 'react'
 
 import { cancelTurn, clearConversation, followTurn, getTurn, loadMessages, openSession, retryTurn, submitTurn } from '../api/chat'
 import type { ChatMessage, TurnSnapshot } from '../types/api'
-import BalanceResult from '../components/BalanceResult'
+import Markdown from '../components/Markdown'
+import ResultCard from '../components/ResultCard'
 import { ApiError } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { saveChatCache } from '../utils/chatCache'
-import { mergeMessages, turnProgressText } from '../utils/chat'
+import { errorText, mergeMessages, turnProgressText } from '../utils/chat'
 
 const FAILED = ['failed', 'cancelled']
 const STATUS: Record<string, string> = {
   failed: '生成失败', cancelled: '已停止',
 }
+/** 结果种类的中文名；未知 kind 直接显示原始 kind，不再让前端猜。 */
+const RESULT_KIND: Record<string, string> = { balance: '资产结果', price: '行情结果', aggregate: '合并结果' }
 
 function Workspace() {
   const address = useAuthStore(s => s.address)
@@ -29,7 +32,7 @@ function Workspace() {
   const [loading, setLoading] = useState(true)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [sending, setSending] = useState(false)
-  const [reconnecting, setReconnecting] = useState(false)
+  const [, setReconnecting] = useState(false)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [phase, setPhase] = useState<string>('queued')
@@ -60,7 +63,7 @@ function Workspace() {
     if (!['queued', 'running'].includes(snapshot.status) && !snapshot.persistence_pending) {
       setConnectionFailed(false)
       setReconnecting(false)
-      setError(snapshot.error)
+      setError(errorText(snapshot.error))
     } else if (snapshot.persistence_pending) {
       setError(null)
     }
@@ -197,7 +200,7 @@ function Workspace() {
 
   const last = messages.filter((item) => item.role === 'assistant').at(-1)
   const blocked = Boolean(active) || Boolean(pendingTurn) || sending || loading || connectionFailed
-  const refs = messages.flatMap(m => m.result_refs ?? [])
+  const results = messages.flatMap(m => m.results ?? [])
   return <div className="chat-layout"><section className="chat-main">
 
     <div role="log" aria-label="对话记录" aria-live="polite"
@@ -207,7 +210,7 @@ function Workspace() {
       </Button>}
       {loading ? <Spin /> : !messages.length && <Empty description="开始提问，例如：查询我的 BERA 余额" />}
       {messages.map((item) => {
-        const itemRefs = item.result_refs ?? []
+        const itemResults = item.results ?? []
         // 用户气泡右下角的时间来自提问时刻，与回答共用同一个值。
         const sentAt = item.role === 'user' ? formatClock(item.created_at) : ''
         if (item.role === 'user') return <div className="msg me" key={item.id}>
@@ -216,20 +219,26 @@ function Workspace() {
             {sentAt && <div className="me-t">{sentAt}</div>}</div>
         </div>
         const speaking = ['queued', 'running'].includes(item.status)
-        // 「结果」块顶部那句模型话；生成中带光标，还没有正文时也占位。
-        const say = (item.content || speaking) ? <div className="res-say" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{item.content}{speaking && <span className="stream-cursor" />}</div> : null
+        // 「结果」块顶部那句模型话；还没吐字时用三点流动占位，有正文后只剩正文（不再挂光标）。
+        const say = (item.content || speaking) ? <div className="res-say">{item.content
+          ? <Markdown text={item.content} />
+          : <span className="stream-cursor"><i /><i /><i /></span>}</div> : null
         // 回答区固定两段：结果常显，数据来源与明细折叠；纯文字回答只有结果块。
+        // 流式期间只给模型正文，数据来源与工具调用等输出结束再出现。
         return <div className="msg" key={item.id}>
           <div className="av ai">AI</div>
           <div className="ans">
-            {itemRefs.length
-              ? itemRefs.map((ref, index) => <BalanceResult compact key={ref.result_id} id={ref.result_id} say={index === 0 ? say : null} />)
+            {itemResults.length
+              // 流式期间只渲染首张（承载正文）；多结果里其余卡此刻既无正文也无折叠区，
+              // 渲染出来就是个空格子。等输出结束再一起出现。
+              ? (speaking ? itemResults.slice(0, 1) : itemResults)
+                .map((result, index) => <ResultCard key={result.result_id} result={result}
+                  say={index === 0 ? say : null} toolMeta={index === 0 ? item.tool_meta : undefined} streaming={speaking} />)
               : <div className="blk"><div className="blk-b">{say}</div></div>}
             {STATUS[item.status] && item.turn_id !== pendingTurn && <div className="message-status">{STATUS[item.status]}</div>}
           </div>
         </div>
       })}
-      {active && !connectionFailed && <div className="live-line"><span className="spin" /><span>{reconnecting ? '连接中断，正在恢复…' : turnProgressText(phase)}</span></div>}
       {connectionFailed && <div className="stream-bad"><span className="dot" style={{ background: '#FF8A9B', flex: 'none' }} /><span>{error ?? '连接已断开'}，已生成的内容不会丢失。</span><Button size="small" loading={loading} disabled={sending || loadingEarlier} onClick={() => { if (lifetime.current) void restore(lifetime.current.signal) }}>恢复对话</Button></div>}
       <div ref={end} />
     </div>
@@ -263,10 +272,10 @@ function Workspace() {
     </div><div className="composer-foot">Enter 发送 · Shift+Enter 换行 · 余额以数据卡片为准</div></div></section><aside className="chat-side">
       <div className="side-block"><div className="side-t">本次会话</div>{[
         ['绑定地址', address ? shorten(address) : '—'], ['来源', '登录凭证 · 只读'], ['模型', model?.model ?? '读取中'],
-        ['结果引用', `${refs.length} 份（当前已加载历史）`], ['上下文窗口', model?.context_window ? `${model.context_window} tokens` : '—'],
+        ['结果数', `${results.length} 份（当前已加载历史）`], ['上下文窗口', model?.context_window ? `${model.context_window} tokens` : '—'],
         ['上下文用量', '暂未提供统计'], ['执行状态', active ? turnProgressText(phase) : pendingTurn ? '正在补写' : '等待提问'],
       ].map(([key, value]) => <div className="side-row" key={key}><span className="k">{key}</span><span className="v">{value}</span></div>)}</div>
-      <div className="side-block"><div className="side-t">工具结果轨迹 · 仅元数据</div>{refs.length ? refs.slice(-8).map((ref, i) => <div className="trace" key={`${ref.result_id}:${i}`}><i className={`dot ${ref.isComplete ? 'ok' : 'warn'}`} /><div><div className="tn">资产结果 · {ref.isComplete ? '完整' : '部分'}</div><div className="tt">{ref.chain_ids?.length ?? '—'} 网络 · {ref.symbols?.length ?? '—'} 代币 · {ref.queriedAt ? new Date(ref.queriedAt).toLocaleTimeString() : '时间未提供'}</div></div></div>) : <p className="empty-trace">尚无资产结果。公开行情调用没有资产结果引用，不计入此列表。</p>}</div>
+      <div className="side-block"><div className="side-t">结果轨迹 · 仅元数据</div>{results.length ? results.slice(-8).map((result, i) => <div className="trace" key={`${result.result_id}:${i}`}><i className={`dot ${result.status === 'complete' ? 'ok' : 'warn'}`} /><div><div className="tn">{RESULT_KIND[result.kind] ?? result.kind} · {result.status === 'complete' ? '完整' : result.status === 'failed' ? '失败' : '部分'}</div><div className="tt">{result.source_desc ?? (result.queriedAt ? new Date(result.queriedAt).toLocaleTimeString() : '时间未提供')}</div></div></div>) : <p className="empty-trace">尚无业务结果。资产查询与公开行情都会在这里留一条。</p>}</div>
       <div className="side-block"><div className="side-t">能力入口（扩展位）</div><Note title="▤">知识库检索后续通过 search_knowledge 工具接入，复用当前调度和权限边界。</Note></div>
     </aside></div>
 }

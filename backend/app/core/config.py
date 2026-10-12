@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     database_migration_url: str = "postgresql+asyncpg://app_ddl:copilot_dev_ddl@127.0.0.1:54329/web3copilot"
     # 周期保存正文快照；结束/失败/取消另行立即保存，避免仅靠周期任务遗漏终态。
     copilot_snapshot_seconds: float = Field(default=1.0, gt=0)
+    # 增量推送节拍：比落库节流细得多，又不用每个 token 都发一帧。
+    copilot_stream_seconds: float = Field(default=0.05, gt=0)
 
     # 工厂选择提供方；云端模型窗口必须按部署明确配置，不能沿用本地默认值。
     model_provider: Literal["ollama", "deepseek", "qwen"] = "ollama"
@@ -51,16 +53,27 @@ class Settings(BaseSettings):
     qwen_model: str = "qwen-plus"
     qwen_context_window: int = Field(default=32768, ge=4096)
     model_context_window: int | None = Field(default=None, ge=4096)
-    model_output_tokens: int = Field(default=1024, ge=1)
+    # 单次回复的输出上限，**含推理模型的思考 token**。带思考的模型会把额度先花在推理上，
+    # 1024 实测被思考吃掉 900+，正文只写出一条就被截断（finish_reason=length）。
+    model_output_tokens: int = Field(default=8192, ge=1)
     model_context_reserve: int = Field(default=1024, ge=256)
     # 本地默认串行；云端可按部署容量增加并发。
     model_concurrency: int = Field(default=1, ge=1, le=32)
-    agent_model_call_limit: int = Field(default=3, ge=1, le=20)
-    agent_tool_call_limit: int = Field(default=4, ge=1, le=20)
+    # 一轮回答里模型最多被调用几次 / 工具最多被调用几次。一次「模型调用」= 模型想一轮
+    # （要么给正文、要么给工具调用）。多步提问天然要多轮：查链 → 查持仓 → 合并 → 写正文就是 4 轮。
+    # 定成 3 时这类问题会在写正文前被拦下并报错；留出余量但仍封顶，防止模型来回打转。
+    agent_model_call_limit: int = Field(default=6, ge=1, le=20)
+    agent_tool_call_limit: int = Field(default=8, ge=1, le=20)
     chat_queue_limit: int = Field(default=16, ge=1)
     chat_queue_timeout_seconds: float = Field(default=30, gt=0)
     copilot_timeout_seconds: float = Field(default=180, gt=0)
     tool_timeout_seconds: float = Field(default=30, gt=0)
+
+    # ── 追踪 ──────────────────────────────────────────────
+    # 一次提问的完整链路（每步模型调用、工具调用、耗时、用量）上报到 LangSmith，
+    # 前端拿到的 trace 链接直接落到这一轮。留空 key 即不启用，本地与测试无外发。
+    langsmith_api_key: SecretStr = SecretStr("")
+    langsmith_project: str = "web3-ai-copilot"
 
     # ── 链 ────────────────────────────────────────────────
     # 链本身的参数（chain_id / 原生币 / Multicall 地址 / 公共 RPC / 浏览器）
@@ -115,7 +128,7 @@ class Settings(BaseSettings):
     request_limit_per_minute: int = Field(default=60, ge=1)
     anonymous_limit_per_minute: int = Field(default=20, ge=1)
     cache_max_entries: int = Field(default=256, ge=1)
-    # 每次模型调用前允许进入上下文的历史预算（估算 token，口径见 agent/memory.py）。
+    # 每次模型调用前允许进入上下文的历史预算（估算 token，口径见 agent/middleware.py）。
     agent_context_tokens: int = Field(default=16384, ge=2048)
 
     # ── 质押 ──────────────────────────────────────────────

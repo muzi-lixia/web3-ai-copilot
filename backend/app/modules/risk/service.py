@@ -132,7 +132,7 @@ def build_report(
     #
     # 因为 Decimal 与 float 在 Python 里**不能混算**：`1.0 - Decimal("0.5")` 直接抛
     # TypeError（不是悄悄降精度）。`value_usd` 是 Decimal，所以 value/total 也是 Decimal，
-    # 再拿它去减 1.0 或乘 100.0 就会炸 —— 这就是这个接口之前必然 500 的原因。
+    # 再拿它去减 1.0 或乘 100.0 就会炸。
     #
     # 边界正好落在这里：**金额侧（value_usd）继续用 Decimal，比率侧从这行起是 float**，
     # 与 schemas/risk.py 里这几个字段声明为 number 一致。

@@ -157,8 +157,8 @@ async def balances(body: Query, request: Request, current: IdentityDep):
 
 @router.get("/me/balance-results/{result_id}", tags=["资产查询"], summary="读取本人资产查询结果")
 async def result(result_id: str, request: Request, current: IdentityDep):
-    """按 ID 读本人查询结果；结果按 user_id 归属，读他人结果会 404。"""
-    return success(await request.app.state.services.results.get(current.user_id, result_id))
+    """按 ID 读本人查询结果，返回信封 + body；结果按 user_id 归属，读他人结果会 404。"""
+    return success(await request.app.state.services.results.read(current.user_id, result_id))
 
 
 @router.post("/me/aggregations", status_code=201, tags=["资产查询"], summary="去重汇总本人查询结果")

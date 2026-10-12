@@ -1,11 +1,29 @@
 """链上最小单位的精确转换与金额计算上下文。
 
-数量和金额保持 Decimal，只有展示比率才转换 float；这里不决定前端显示的小数位数。
+数量和金额保持 Decimal，只有展示比率才转换 float。
+USD 金额的落地小数位在这里唯一决定：`cut_usd` 是序列化出口唯一的截断点。
 """
 
 from decimal import Decimal, localcontext
 from functools import wraps
 from inspect import iscoroutinefunction
+
+_USD_PLACES = 6
+"""USD 金额统一下发 6 位小数。"""
+
+
+def cut_usd(value: Decimal | str | None) -> str | None:
+    """把 USD 金额截断到 6 位小数：直接截取，不四舍五入。
+
+    行情源的单价本身就可能带几十位小数（如 DefiLlama 的 HONEY ≈ 96 位），
+    相乘得到的 value_usd 更长。若原样下发，接口响应、入库记录、给模型的摘要
+    都会出现几十位的数字串。截断放在序列化的唯一出口，三处取到同一个值。
+    """
+    if value is None:
+        return None
+    text = format(value, "f") if isinstance(value, Decimal) else str(value)
+    head, dot, frac = text.partition(".")
+    return f"{head}.{frac[:_USD_PLACES]}" if dot else head
 
 
 def to_human(raw: int, decimals: int) -> Decimal:

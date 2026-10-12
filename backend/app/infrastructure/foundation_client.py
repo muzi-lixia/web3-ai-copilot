@@ -18,11 +18,25 @@ class FoundationClient:
             transport=transport,
         )
 
-    async def request(self, method, path, token, **kwargs):
-        """带凭证调用基础服务，并把上游错误统一翻译成本服务错误。
+    @staticmethod
+    def _error_body(response):
+        """尽力取出基础服务的错误 body；不是 JSON 就返回空字典。
 
-        401 区分「登录整体失效」与「凭证过期」两种码；其余错误不回传上游原文，
-        避免通过错误内容泄露真实数据。204 返回 None，否则取 data 字段。
+        基础服务的 msg 与数字业务码是设计上就公开的文案（连 500 都被兜底成
+        「服务内部错误」，见 core.exception_handlers），可以原样带给调用方；
+        这里只防它返回非 JSON body。
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    async def request(self, method, path, token, **kwargs):
+        """带凭证调用基础服务，并把上游错误翻译成本服务错误。
+
+        401 区分「登录整体失效」与「凭证过期」两种码；其余错误保留基础服务自己的
+        公开说明（msg + 数字业务码），不带请求 URL 或签名。204 返回 None，否则取 data。
         """
         with span("foundation.call"):
             try:
@@ -38,13 +52,17 @@ class FoundationClient:
                 )
             except httpx.HTTPError:
                 raise UpstreamError("基础服务暂不可用", code="foundation_unavailable") from None
+            body = self._error_body(response) if response.is_error else {}
             if response.status_code == 401:
-                code = "access_expired" if response.json().get("code") == 40103 else "unauthorized"
+                code = "access_expired" if body.get("code") == 40103 else "unauthorized"
                 raise UnauthorizedError("登录凭证已失效", code=code)
             if response.is_error:
-                # 不转发上游原文、请求 URL 或签名，避免通过错误内容泄露真实数据。
-                error = AppError("业务查询失败，请检查参数或稍后重试", code="business_query_failed")
+                # 原文不再丢弃：只剩一句通用文案时，调用方无从判断是缺参数还是上游故障。
+                error = AppError(
+                    body.get("msg") or "业务查询失败，请稍后重试", code="business_query_failed"
+                )
                 error.status_code = response.status_code
+                error.upstream_code = body.get("code")
                 raise error
             return None if response.status_code == 204 else response.json()["data"]
 

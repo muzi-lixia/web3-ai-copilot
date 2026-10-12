@@ -21,7 +21,8 @@ def test_foundation_and_business_do_not_import_agent():
 
 
 def test_tools_do_not_import_business_services():
-    assert not any(m.startswith("app.modules") for m in imports(APP / "agent/tools.py"))
+    for path in (APP / "agent" / "tools").rglob("*.py"):
+        assert not any(m.startswith("app.modules") for m in imports(path)), path
 
 
 def test_business_and_infrastructure_do_not_import_routes():

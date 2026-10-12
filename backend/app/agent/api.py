@@ -1,6 +1,7 @@
 """对话 HTTP 入口：只收当前消息和幂等键，不接受历史、地址或身份声明。"""
 
 import json
+from contextlib import aclosing
 from typing import Annotated
 from uuid import UUID
 
@@ -156,24 +157,27 @@ async def clear(request: Request, user: Current):
 async def events(turn_id: UUID, request: Request, user: Current):
     """订阅某轮次的 SSE 快照流。
 
-    先做一次归属校验（越权直接 404），返回后由生成器持续推送；断开连接只结束订阅，
-    不会取消正在进行的生成 —— 取消必须走独立的 cancellation 接口。
+    建流前只做一次归属校验（越权直接 404），之后的快照读取由生成器负责；
+    断开连接只结束订阅，不会取消正在进行的生成 —— 取消必须走独立的 cancellation 接口。
     """
     chat = request.app.state.services.chat
-    await chat.snapshot(user["user_id"], str(turn_id))
+    await chat.authorize(user["user_id"], str(turn_id))
 
     async def stream():
         """把业务事件翻译成 SSE 帧；ping 用心跳注释帧，其余按 type 命名事件。"""
         try:
-            async for event in chat.events(user["user_id"], str(turn_id), user["token"]):
-                # 客户端已断开就结束生成器；注意这只停订阅，后台生成不受影响。
-                if await request.is_disconnected():
-                    return
-                if event["type"] == "ping":
-                    # 心跳走 SSE 注释帧（冒号开头），不会被前端当成业务事件。
-                    yield ": ping\n\n"
-                else:
-                    yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            # aclosing 保证断开时订阅真的被关闭：Starlette 不会关闭响应生成器，
+            # 少了这层，订阅队列要等垃圾回收才摘除，那期间广播仍会往里推。
+            async with aclosing(chat.events(user["user_id"], str(turn_id), user["token"])) as source:
+                async for event in source:
+                    # 客户端已断开就结束生成器；注意这只停订阅，后台生成不受影响。
+                    if await request.is_disconnected():
+                        return
+                    if event["type"] == "ping":
+                        # 心跳走 SSE 注释帧（冒号开头），不会被前端当成业务事件。
+                        yield ": ping\n\n"
+                    else:
+                        yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
         except AppError as exc:
             # 业务异常转成 error 帧而不是让连接以 500 断开，前端能拿到可读的错误码。
             yield (

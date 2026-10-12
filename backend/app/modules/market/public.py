@@ -79,7 +79,8 @@ async def historical_change(chain, token, current, resources):
             return None
     with localcontext() as ctx:
         ctx.prec = 100
-        return format((current - old) / old * 100, "f")
+        # 除法结果会带满 prec 位有效数字，量化到两位再序列化，避免长尾小数透到前端。
+        return format(((current - old) / old * 100).quantize(Decimal("0.01")), "f")
 
 
 async def quote(chain_id, symbol, currency, resources):

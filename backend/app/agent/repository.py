@@ -115,10 +115,18 @@ class ConversationRepository:
         和轮次内的 version 是两回事：前者用于排序，后者用于判断快照新旧。
         """
         async with self.db.transaction(user) as s:
+            # seq 要按会话内全部轮次排名才得出，作为子查询跟主查询一起取，
+            # 避免为它单开一次事务；(created_at,id) 元组比较让同一时刻创建的两轮
+            # 也有稳定次序，不依赖单列时间戳。
             row = (
                 (
                     await s.execute(
-                        text("SELECT * FROM agent_turns WHERE id=:t AND user_id=:u"), dict(t=tid, u=user)
+                        text("""SELECT t.*,
+                        (SELECT count(*) FROM agent_turns r
+                         WHERE r.user_id=t.user_id AND r.conversation_id=t.conversation_id
+                           AND (r.created_at,r.id)<=(t.created_at,t.id)) AS seq_rank
+                        FROM agent_turns t WHERE t.id=:t AND t.user_id=:u"""),
+                        dict(t=tid, u=user),
                     )
                 )
                 .mappings()
@@ -127,19 +135,18 @@ class ConversationRepository:
         if not row:
             raise NotFoundError("轮次不存在")
         value = dict(row)
-        # seq 要按会话内全部轮次排名才得出，所以要单独查一次；(created_at,id) 元组比较
-        # 让同一时刻创建的两轮也有稳定次序，不依赖单列时间戳。
-        async with self.db.transaction(user) as s:
-            rank = await s.scalar(
-                text(
-                    "SELECT count(*) FROM agent_turns WHERE user_id=:u "
-                    "AND conversation_id=:c AND (created_at,id)<=(:at,:id)"
-                ),
-                dict(u=user, c=row["conversation_id"], at=row["created_at"], id=row["id"]),
-            )
         # 每轮占两个展示位（用户提问 + 助手回答），故 seq = 排名 * 2。
-        value["seq"] = rank * 2
+        value["seq"] = value.pop("seq_rank") * 2
         return value
+
+    async def owns(self, user, tid):
+        """判断这一轮是否属于本人；只做归属校验，不读整行。"""
+        async with self.db.transaction(user) as s:
+            return bool(
+                await s.scalar(
+                    text("SELECT 1 FROM agent_turns WHERE id=:t AND user_id=:u"), dict(t=tid, u=user)
+                )
+            )
 
     async def update(self, user, tid, answer, state, results, *, error=None, usage=None, tool_trace=None):
         """写入一轮的展示状态；answer 是全量正文，不是增量。
@@ -249,8 +256,12 @@ class ConversationRepository:
 
     @staticmethod
     def snapshot(row, seq=0):
-        """展示快照只含结果引用，真实结果只能经基础服务鉴权读取。"""
+        """展示快照：业务结果随消息下发，工具调用元信息单独一块。
+
+        结果与工具元信息都是本轮生成时写好的，这里只做投影，不重新查询真实数据。
+        """
         state = row["state"]
+        calls = row.get("tool_trace") or []
         return dict(
             turn_id=row["id"],
             session_id=row["conversation_id"],
@@ -263,7 +274,13 @@ class ConversationRepository:
                 role="assistant",
                 content=row["answer"],
                 status=state,
-                result_refs=row["results"],
+                results=row["results"],
+                tool_meta=dict(
+                    calls=calls,
+                    total_duration_ms=sum(int(c.get("duration_ms") or 0) for c in calls),
+                    # 提问时写入的追踪串，前端复制它去日志里对这一次调用。
+                    trace_id=row.get("trace_id"),
+                ),
                 # 提问时刻，与同轮的用户消息共用；回答完成时刻另行记录。
                 created_at=row["created_at"].isoformat(),
             ),
