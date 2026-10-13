@@ -1,0 +1,202 @@
+# 检索层用例：问句是中文、语料是英文，这是真实用法（跨语种召回）。
+#
+# 期望写成「出处 + 内容里必须出现的原话」，不锁相似度数值、不锁片段顺序：
+# 换向量模型或调召回只要还能把这一段取回来，就该通过。top_k 与线上检索的
+# 取值保持一致，否则评估的就不是用户实际看到的结果。
+#
+# expected_fail 标的是「期望合理、当前确实取不到」的已知缺口：照常计入 MRR，
+# 但不把整轮判成失败；等它真能命中了，报告会提醒把标记去掉。
+#
+# 用例数随语料增长 —— 语料只有一份文档时，前 5 名几乎覆盖全部片段，通过率参考价值有限。
+#
+# 每条用例的字段：
+#   name          用例名，报告与基线都按它定位，必须唯一
+#   query         送进检索的原始问句，就是用户会打的那句话
+#   expect_doc    期望命中的文档，匹配片段的文件名或文档标题
+#   expect_any    期望在片段正文里出现的原话，命中任意一条即可（可写多条）
+#   top_k         取前多少名参与判定，与线上检索一致才有意义
+#   expected_fail 是否属于已知缺口，缺省 false
+#   note          备注，只在「已知缺口」段落里展示，说明当前为什么取不到
+#
+# expect_doc 与 expect_any 至少要写一个，只写问题不写期望无法判定。
+
+# 原生代币用途：验证正文块的召回归属，参考标题为 Role of BERA。
+[[case]]
+name = "bera-role"
+query = "BERA 这个代币是干什么用的"
+expect_doc = "bera.pdf"
+expect_any = ["gas token"]
+top_k = 5
+note = "原生代币用途；正文块，标题为 Role of BERA"
+
+# 质押产物：验证「标题里才有的专有名词」能不能被问句取回。
+[[case]]
+name = "bera-staking"
+query = "质押 BERA 会得到什么"
+expect_doc = "bera.pdf"
+expect_any = ["sWBERA"]
+top_k = 5
+note = "质押产物；标题为 Role of BERA > Stake BERA for sWBERA"
+
+# 表格块：向量化时把标题拼进去才排得进前 k，这条专盯表格片的召回。
+[[case]]
+name = "bera-total-supply"
+query = "BERA 的总发行量是多少"
+expect_doc = "bera.pdf"
+expect_any = ["500,000,000"]
+top_k = 5
+note = "总量；表格块，靠标题拼进向量才排得前"
+
+# 与总量同页：验证同一页的两个不同数字不会被互相挤掉。
+[[case]]
+name = "bera-allocation"
+query = "BERA 代币是怎么分配的"
+expect_doc = "bera.pdf"
+expect_any = ["core contributors"]
+top_k = 5
+note = "分配明细；与总量同页，用来验证两者不会被互相挤掉"
+
+# 已知缺口：中文自然问法取不到，换英文问句能排第 1，属中英概念对齐问题。
+[[case]]
+name = "bera-vesting"
+query = "BERA 有没有锁定期和解锁安排"
+expect_doc = "bera.pdf"
+expect_any = ["Cliff: 1 year"]
+top_k = 5
+expected_fail = true
+note = "跨语种语义缺口：中文自然问法排第 7~8，换成英文问句或带上 cliff 则排第 1。"
+
+
+# =========what-is-berachain.md========
+# 定位：验证开头概述能被「是什么」这类问法取回
+[[case]]
+name = "berachain-what"
+query = "Berachain 是一条什么链"
+expect_doc = "what-is-berachain.md"
+expect_any = ["EVM-identical Layer 1"]
+top_k = 5
+
+# 定位：EVM Identical 一节，验证「兼容以太坊」换一种问法的召回。
+[[case]]
+name = "berachain-evm"
+query = "Berachain 和以太坊虚拟机兼容吗"
+expect_doc = "what-is-berachain.md"
+expect_any = ["execution environment is identical to the Ethereum Virtual Machine"]
+top_k = 5
+
+# 定位：PoL 机制说明，验证抽象概念问句能命中。
+[[case]]
+name = "berachain-pol"
+query = "流动性证明和别的链发代币有什么不一样"
+expect_doc = "what-is-berachain.md"
+expect_any = ["spend emissions like a faucet"]
+top_k = 5
+
+# 定位：PoL 举例块，验证「有哪些应用」这类列举问句。
+[[case]]
+name = "berachain-apps"
+query = "Berachain 上有哪些原生应用"
+expect_doc = "what-is-berachain.md"
+expect_any = ["BEX, Bend"]
+top_k = 5
+
+# 定位：BeaconKit 一节，验证专有名词问句。
+[[case]]
+name = "berachain-beaconkit"
+query = "BeaconKit 是做什么的"
+expect_doc = "what-is-berachain.md"
+expect_any = ["modular framework for building EVM consensus clients"]
+top_k = 5
+
+# ===== reward-vaults.md =====
+
+# 定位：质押入口块，验证「怎么赚」这类操作问句。
+[[case]]
+name = "vault-stake"
+query = "怎么通过 Reward Vault 赚 WBERA"
+expect_doc = "reward-vaults.md"
+expect_any = ["stakes the PoL-eligible asset in that vault"]
+top_k = 5
+
+# 定位：代质押一节，验证「帮别人质押」这种关系问句。
+[[case]]
+name = "vault-delegate"
+query = "能替别的地址质押吗"
+expect_doc = "reward-vaults.md"
+expect_any = ["can stake on behalf of another"]
+top_k = 5
+
+# 定位：发放时序两种模式，验证同主题两个子块不被互相挤掉（一）。
+[[case]]
+name = "vault-duration"
+query = "WBERA 奖励的发放周期是怎么定的"
+expect_doc = "reward-vaults.md"
+expect_any = ["rewardsDuration"]
+top_k = 5
+
+# 定位：发放时序两种模式，验证同主题两个子块不被互相挤掉（二）。
+[[case]]
+name = "vault-target-rate"
+query = "target rate 模式怎么算发放周期"
+expect_doc = "reward-vaults.md"
+expect_any = ["targetRewardsPerSecond"]
+top_k = 5
+
+# 定位：APR 计算一节，验证公式类块（正文几乎全是符号）的召回。
+[[case]]
+name = "vault-apr"
+query = "Reward Vault 的 APR 怎么算"
+expect_doc = "reward-vaults.md"
+expect_any = ["secondsPerYear"]
+top_k = 5
+
+# 定位：领取产出块，验证「领到手是什么」这类结果问句。
+[[case]]
+name = "vault-claim"
+query = "从 Reward Vault 领奖励最终拿到什么"
+expect_doc = "reward-vaults.md"
+expect_any = ["atomically during claim"]
+top_k = 5
+
+# ===== document.docx =====
+
+# 定位：激励如何下发，验证 docx 标题路径（Heading 2 开头）下的召回。
+[[case]]
+name = "imarket-work"
+query = "激励是怎么发给验证者的"
+expect_doc = "document.docx"
+expect_any = ["BeraChef applies their reward allocation"]
+top_k = 5
+
+# 定位：白名单规则，验证带数字的约束类问句。
+[[case]]
+name = "imarket-whitelist"
+query = "激励代币要走白名单吗，最多几个"
+expect_doc = "document.docx"
+expect_any = ["whitelist up to two incentive tokens"]
+top_k = 5
+
+# 定位：结算汇聚点，验证专有名词 + 用途解释块。
+[[case]]
+name = "imarket-collector"
+query = "收上来的激励代币集中在哪里结算"
+expect_doc = "document.docx"
+expect_any = ["the shared settlement path for Reward Vault incentives"]
+top_k = 5
+
+# 定位：结算行为，验证「付出/换回什么」的流程问句。
+[[case]]
+name = "imarket-settlement"
+query = "结算是买方付什么、换回什么"
+expect_doc = "document.docx"
+expect_any = ["fixed-price exchange against the collector"]
+top_k = 5
+
+# 定位：重定向出口，验证链路末端块也能被问回。
+[[case]]
+name = "imarket-redirect"
+query = "被重定向的激励代币最后变成什么"
+expect_doc = "document.docx"
+expect_any = ["auction WBERA becomes yield"]
+top_k = 5
+

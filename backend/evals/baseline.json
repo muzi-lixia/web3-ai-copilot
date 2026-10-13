@@ -1,0 +1,32 @@
+{
+  "retrieval": {
+    "passed": 20,
+    "evaluated": 21,
+    "metrics": {
+      "MRR": 0.8095238095238095
+    },
+    "ranks": {
+      "bera-role": 1,
+      "bera-staking": 2,
+      "bera-total-supply": 2,
+      "bera-allocation": 1,
+      "bera-vesting": null,
+      "berachain-what": 1,
+      "berachain-evm": 1,
+      "berachain-pol": 2,
+      "berachain-apps": 2,
+      "berachain-beaconkit": 1,
+      "vault-stake": 1,
+      "vault-delegate": 1,
+      "vault-duration": 1,
+      "vault-target-rate": 1,
+      "vault-apr": 2,
+      "vault-claim": 2,
+      "imarket-work": 1,
+      "imarket-whitelist": 1,
+      "imarket-collector": 1,
+      "imarket-settlement": 1,
+      "imarket-redirect": 1
+    }
+  }
+}
