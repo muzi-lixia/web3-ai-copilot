@@ -11,6 +11,14 @@ async def _no_persist():
     """
 
 
+async def _no_rewrite(query: str, history: str) -> str:
+    """默认的检索改写：原样返回问题。
+
+    只有 generate() 构造的上下文才注入真实实现；其它路径直接拿原问题去检索。
+    """
+    return query
+
+
 @dataclass
 class RunContext:
     """一次生成的运行上下文，只由服务端构造。
@@ -32,3 +40,6 @@ class RunContext:
     # 工具产出新结果时立即落库并唤醒订阅端：卡片不必等 1 秒的落库刻度。
     # 由 generate() 注入；默认空实现，便于测试直接构造上下文。
     persist: Callable[[], Awaitable[None]] = field(default=_no_persist, repr=False)
+    # 检索前的问题改写（问题, 历史对话）→ 可独立检索的句子。同样由 generate() 注入本轮
+    # 模型实例；默认原样返回，检索不靠改写成立。
+    rewrite: Callable[[str, str], Awaitable[str]] = field(default=_no_rewrite, repr=False)

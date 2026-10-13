@@ -21,7 +21,7 @@ export const router = createBrowserRouter([
       { path: 'login', element: <Login /> },
       { path: 'services', element: <Services /> },
       { path: 'settings', element: <Settings /> },
-      { path: 'knowledge', element: <Knowledge /> },
+      { path: 'knowledge', element: <RequireAuth><Knowledge /></RequireAuth> },
       { index: true, element: <Navigate to="/copilot" replace /> },
       { path: 'dashboard', element: <RequireAuth><Dashboard /></RequireAuth> },
       { path: 'portfolio', element: <RequireAuth><Assets /></RequireAuth> },

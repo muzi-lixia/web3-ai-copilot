@@ -1,12 +1,218 @@
-import { Table, Button } from 'antd'
-import { Panel, Note } from '../components/PageParts'
+import { Alert, Button, Popconfirm, Space, Table, Tag, Typography, Upload } from 'antd'
+import type { TableProps } from 'antd'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+
+import { fetchDocuments, removeDocument, retryDocument, uploadDocument } from '../api/knowledge'
+import { Note, Panel } from '../components/PageParts'
+import { useSessionProbe } from '../hooks/useSessionProbe'
+import { useAuthStore } from '../stores/auth'
+import type { DocumentStatus, KnowledgeDocument } from '../types/api'
+
+/** 后台处理是异步的，标签要说清现在走到哪一步，而不是只给个颜色。 */
+const STATUS: Record<DocumentStatus, { text: string; color?: string }> = {
+  pending: { text: '排队中' },
+  processing: { text: '处理中', color: 'processing' },
+  ready: { text: '可检索', color: 'green' },
+  failed: { text: '失败', color: 'red' },
+}
+
+/** 失败原因多是解析器或依赖服务的原文，单看它分不出该换文件还是等服务；按阶段补一句人话。 */
+const STAGE_HINT: Record<string, string> = {
+  load: '文件解析失败',
+  clean: '内容清洗失败',
+  split: '内容切分失败',
+  embed: '向量化服务不可用',
+  unknown: '处理未预料地中断',
+}
+
+/** 体积只到 MB，够判断文件量级；更细的单位对"要不要传"没有帮助。 */
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const kb = bytes / 1024
+  return kb < 1024 ? `${kb.toFixed(1)} KB` : `${(kb / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 知识库文档管理。数据源：/knowledge/documents。
+ *
+ * 离线链路的进度只能从这里看：上传只登记一行，解析、切分、向量化都在后台跑。
+ * 所以列表在处理中会重读，而不是上传成功后当它已经入库。
+ */
 export default function Knowledge() {
-  return <><div className="kb-hero"><span className="proto-tag soon">规划中 · 后续扩展</span><h3>RAG 知识库</h3><p>知识库管理与对话引用预留在这里，后续通过新增工具接入现有对话通道。</p></div>
-    <div className="proto-grid three-cols" style={{ marginBottom: 16 }}>{[
-      ['文档管理', '上传 / 归档 / 切分 / 版本。支持协议文档、操作指南与个人笔记。'],
-      ['向量检索', '切片 → 向量化 → 检索 → 重排。检索结果携带出处。'],
-      ['对话引用', '回答附带引用来源，用户可打开原文核对。'],
-    ].map(([title, text]) => <div className="kb-card" key={title}><h3>{title}</h3><p>{text}</p><small>规划中 · 尚未启用</small></div>)}</div>
-    <div className="proto-grid two-cols"><Panel title="知识库列表" sub="未接入"><Table size="small" pagination={false} dataSource={[]} columns={[{ title: '名称', dataIndex: 'name' }, { title: '文档数', dataIndex: 'count' }, { title: '状态', dataIndex: 'status' }]} locale={{ emptyText: '尚未创建知识库' }} /><div className="legend"><Button size="small" disabled>上传文档（未开放）</Button><span>当前不执行文档解析、训练或检索</span></div></Panel>
-    <Panel title="对话中的引用会长这样" sub="静态样式预览，不是检索结果"><div className="panel-body"><div className="bub">回答将附带可核对的原文出处。</div><div className="cite"><strong>▤ 文档名称 · 章节</strong><p>检索命中片段将在这里展示；当前没有知识库数据。</p></div><Note title="接线方式">未来增加 search_knowledge 工具，复用现有工具调度与权限控制。</Note></div></Panel></div></>
+  const token = useAuthStore((state) => state.token)
+  // 与顶部栏的会话探针共用同一个查询键，读白名单状态不会多发一次 /users/me。
+  const me = useSessionProbe(token)
+  const isAdmin = me.data?.is_admin === true
+  const queryClient = useQueryClient()
+
+  const documents = useQuery({
+    queryKey: ['knowledge', 'documents'],
+    queryFn: fetchDocuments,
+    enabled: Boolean(token),
+    // 有文档没到终态就每 2 秒重读；全部跑完就停下来，不让页面空转。
+    refetchInterval: (query) =>
+      query.state.data?.some((row) => row.status === 'pending' || row.status === 'processing')
+        ? 2000
+        : false,
+  })
+
+  const upload = useMutation({
+    mutationFn: uploadDocument,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['knowledge', 'documents'] }),
+  })
+  const remove = useMutation({
+    mutationFn: removeDocument,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['knowledge', 'documents'] }),
+  })
+  const retry = useMutation({
+    mutationFn: retryDocument,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['knowledge', 'documents'] }),
+  })
+
+  const rows = documents.data ?? []
+  const pending = rows.filter((row) => row.status === 'pending' || row.status === 'processing').length
+  const failure = upload.error ?? remove.error ?? retry.error ?? documents.error
+
+  const columns: TableProps<KnowledgeDocument>['columns'] = [
+    {
+      title: '文档',
+      key: 'title',
+      render: (_, row) => (
+        <Space orientation="vertical" size={0}>
+          <Typography.Text strong>{row.title}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {row.filename}
+          </Typography.Text>
+        </Space>
+      ),
+    },
+    {
+      title: '体积',
+      key: 'size_bytes',
+      align: 'right',
+      render: (_, row) => humanSize(row.size_bytes),
+    },
+    {
+      title: '状态',
+      key: 'status',
+      render: (_, row) => (
+        <Space orientation="vertical" size={0}>
+          <Tag color={STATUS[row.status].color}>{STATUS[row.status].text}</Tag>
+          {row.error !== null && (
+            <Typography.Text type="danger" style={{ fontSize: 12 }}>
+              {row.stage ? `${STAGE_HINT[row.stage] ?? row.stage}：${row.error}` : row.error}
+            </Typography.Text>
+          )}
+        </Space>
+      ),
+    },
+    {
+      title: '分片',
+      key: 'chunk_count',
+      align: 'right',
+      render: (_, row) => row.chunk_count,
+    },
+    {
+      title: '上传时间',
+      key: 'created_at',
+      render: (_, row) => new Date(row.created_at).toLocaleString(),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      align: 'right',
+      render: (_, row) => (
+        <Space size={4}>
+          {row.status === 'failed' && (
+            <Button
+              size="small"
+              loading={retry.isPending && retry.variables === row.id}
+              onClick={() => retry.mutate(row.id)}
+            >
+              重试
+            </Button>
+          )}
+          <Popconfirm
+            title="删除这份文档？"
+            description="原件与已入库的分片会一起删除，之后检索不再命中它。"
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => remove.mutate(row.id)}
+          >
+            <Button size="small" danger loading={remove.isPending && remove.variables === row.id}>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ]
+
+  return (
+    <>
+      <div className="kb-hero">
+        <span className="proto-tag live">已接入</span>
+        <h3>RAG 知识库</h3>
+        <p>上传协议文档、操作指南与笔记；后台解析成片段并向量化，供对话检索时引用原文。</p>
+      </div>
+
+      {me.data && !isAdmin && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          title="当前地址没有知识库管理权限"
+          description="上传与删除只对白名单地址开放；能读到列表，但改不了内容。"
+        />
+      )}
+      {failure && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 16 }}
+          title="操作未完成"
+          description={failure instanceof Error ? failure.message : String(failure)}
+        />
+      )}
+
+      <div className="filters" style={{ marginBottom: 14 }}>
+        <Upload
+          accept=".pdf,.md,.markdown,.txt,.docx"
+          showUploadList={false}
+          beforeUpload={(file) => {
+            upload.reset()
+            upload.mutate(file)
+            // 交给 useMutation 发请求，Upload 自己不要另外发一次。
+            return false
+          }}
+        >
+          <Button loading={upload.isPending} disabled={!isAdmin}>
+            上传文档
+          </Button>
+        </Upload>
+        <span className="chip">PDF / Markdown / TXT / DOCX</span>
+        <span className="chip">
+          {pending > 0 ? `${pending} 份处理中` : `共 ${rows.length} 份`}
+        </span>
+      </div>
+
+      <Panel title="文档列表" sub={documents.isFetching ? '读取中' : `${rows.length} 份`}>
+        <Table
+          rowKey="id"
+          size="small"
+          columns={columns}
+          dataSource={rows}
+          pagination={false}
+          loading={documents.isFetching && !documents.data}
+          locale={{ emptyText: '还没有文档，先上传一份' }}
+          scroll={{ x: 'max-content' }}
+        />
+        <Note title="处理是后台异步的">
+          上传只完成登记与落盘；解析、切分、向量化在基础服务的后台队列里跑，状态从「排队中」走到「可检索」。
+          只有状态到了「可检索」，这篇文档才真正会被检索命中。
+          失败的会写明停在哪一步，可以直接重试，不必重新上传。
+        </Note>
+      </Panel>
+    </>
+  )
 }

@@ -19,11 +19,17 @@ from app.core.logging import span, trace_id
 
 @dataclass(frozen=True)
 class Identity:
-    """已认证用户的身份投影：内部 user_id + 会话 ID + 钱包地址（地址不参与 repr）。"""
+    """已认证用户的身份投影：内部 user_id + 会话 ID + 钱包地址 + 凭证用途。
+
+    scope 区分两类凭证：``user`` 是用户自己登录拿到的访问令牌，
+    ``agent`` 是受理一轮时签发的委托凭证，只用于这一轮的取数。
+    两者除寿命外权限一致，都绑定同一个登录会话。
+    """
 
     user_id: str
     session_id: str
     address: str = field(repr=False)
+    scope: str = "user"
 
 
 class AuthService:
@@ -158,6 +164,27 @@ class AuthService:
             session_expires_at=session_expires,
         )
 
+    def issue_agent_permit(self, identity):
+        """签发覆盖一整轮 Agent 执行的委托凭证。
+
+        与访问令牌同密钥同算法、绑定同一个登录会话，但寿命只覆盖一轮：受理时用用户的
+        访问令牌换一张，之后整轮取数都用它 —— 用户令牌在生成期间过期不再作废这一轮。
+        会话被吊销或到期时它同时失效：鉴权时仍要过会话检查这一关。
+        """
+        now = int(time.time())
+        return jwt.encode(
+            dict(
+                sub=identity.user_id,
+                sid=identity.session_id,
+                address=identity.address,
+                scope="agent",
+                iat=now,
+                exp=now + self.settings.agent_permit_seconds,
+            ),
+            self.settings.jwt_secret,
+            algorithm="HS256",
+        )
+
     async def authenticate(self, token):
         """签名与会话状态缺一不可；撤销后即使 JWT 尚未到期也不能访问业务。"""
         try:
@@ -181,9 +208,16 @@ class AuthService:
                     dict(sid=payload["sid"], u=payload["sub"]),
                 )
             ).first()
-        if row is None or row.address != payload["address"]:
+        # 比地址时忽略大小写：库里的地址是小写，而 Identity 上带的是 checksum 形态，
+        # 两者指向同一个地址，签发路径不同不该影响鉴权结果。
+        if row is None or row.address.lower() != payload["address"].lower():
             raise UnauthorizedError("登录会话已失效，请重新登录")
-        return Identity(payload["sub"], payload["sid"], to_checksum_address(row.address))
+        return Identity(
+            payload["sub"],
+            payload["sid"],
+            to_checksum_address(row.address),
+            payload.get("scope", "user"),
+        )
 
     async def refresh(self, token):
         """原子轮换，旧 token 重用会撤销整次登录。撤销必须提交后才能抛错。"""

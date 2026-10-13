@@ -32,6 +32,9 @@ FIELDS = frozenset(
         "chain_id",
         "result_count",
         "exception_type",
+        "document_id",
+        "stage",
+        "kind",
     }
 )
 
@@ -75,13 +78,28 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging(level="INFO"):
-    """输出到标准输出，部署环境负责收集、轮转和保存；不另建追踪平台。"""
+    """输出到标准输出，部署环境负责收集、轮转和保存；不另建追踪平台。
+
+    默认只放 INFO 及以上：解析库会按行输出调试信息，量级远超业务节点，而它们经过
+    格式化后事件名统一落成 application.log，既读不出内容也无法聚合。
+    """
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level.upper())
-    for name in ("httpx", "httpcore", "web3", "urllib3", "sqlalchemy.engine", "uvicorn.access"):
+    # 这些库的日志按 token 或按请求逐条输出，对定位业务问题没有帮助，整体压到 CRITICAL。
+    for name in (
+        "httpx",
+        "httpcore",
+        "web3",
+        "urllib3",
+        "sqlalchemy.engine",
+        "uvicorn.access",
+        "pdfminer",
+        "pdfplumber",
+        "PIL",
+    ):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 

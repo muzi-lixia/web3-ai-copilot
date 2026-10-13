@@ -37,6 +37,9 @@ function Workspace() {
   const [error, setError] = useState<string | null>(null)
   const [phase, setPhase] = useState<string>('queued')
   const [pendingTurn, setPendingTurn] = useState<string | null>(null)
+  /** 最近一次终态失败：凭证过期要自动重放，不能让用户自己点。 */
+  const [failed, setFailed] = useState<{ turnId: string; error: string | null } | null>(null)
+  const autoRetried = useRef(false)
   const sessionId = useRef<string | null>(null)
   const lifetime = useRef<AbortController | null>(null)
   const request = useRef<AbortController | null>(null)
@@ -64,6 +67,7 @@ function Workspace() {
       setConnectionFailed(false)
       setReconnecting(false)
       setError(errorText(snapshot.error))
+      setFailed({ turnId: snapshot.turn_id, error: snapshot.error })
     } else if (snapshot.persistence_pending) {
       setError(null)
     }
@@ -98,7 +102,8 @@ function Workspace() {
   async function restore(signal: AbortSignal) {
     request.current?.abort()
     versions.current.clear()
-    setLoading(true); setError(null); setReconnecting(false); setPendingTurn(null)
+    setLoading(true); setError(null); setReconnecting(false); setPendingTurn(null); setFailed(null)
+    autoRetried.current = false
     try {
       const session = await openSession(signal)
       if (signal.aborted) return
@@ -149,7 +154,7 @@ function Workspace() {
 
   async function send() {
     if (sendingLock.current || active || pendingTurn || loading || connectionFailed || !input.trim()) return
-    sendingLock.current = true; setSending(true); setError(null)
+    sendingLock.current = true; setSending(true); setError(null); autoRetried.current = false
     // trim 仅判断空消息；发送、保存和展示都保留用户原文（包括空格与换行）。
     const text = input
     if (pending.current?.text !== text) pending.current = { text, clientId: crypto.randomUUID() }
@@ -182,6 +187,18 @@ function Workspace() {
       if (alive()) setSending(false)
     }
   }
+
+  /**
+   * 凭证过期是「重放一定成功」的失败：自动重放一次，用户不必自己点「重试上一轮」。
+   * 每个提问只自动重放一次 —— 重放后再失败就交给用户，避免同一轮被无限重放。
+   */
+  useEffect(() => {
+    if (!failed || failed.error !== 'access_expired' || autoRetried.current) return
+    autoRetried.current = true
+    setError(null)
+    void retry(failed.turnId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failed])
 
   async function earlier() {
     if (earlierLock.current || loading || cursor == null) return

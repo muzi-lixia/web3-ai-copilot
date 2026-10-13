@@ -1,7 +1,8 @@
 # 本地持久化服务：只启动 PostgreSQL，后端与 Ollama 仍按原方式运行。
 services:
   postgres:
-    image: postgres:16.13
+    # pgvector 官方镜像：与 postgres:16 同源，额外带 vector 扩展，供知识库向量列使用。
+    image: pgvector/pgvector:pg16
     # 仅绑定本机，避免开发默认口令对应的数据库暴露到局域网或公网。
     ports:
       - "127.0.0.1:54329:5432"

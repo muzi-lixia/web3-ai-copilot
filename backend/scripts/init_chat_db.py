@@ -38,6 +38,8 @@ async def initialize():
         await connection.execute("GRANT USAGE ON SCHEMA public TO app_rw, app_foundation, app_agent")
         await connection.execute("""ALTER DEFAULT PRIVILEGES FOR ROLE app_ddl IN SCHEMA public
             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_rw""")
+        # 安装扩展需要数据库级权限，运行账号没有，只能在管理员连接里建。
+        await connection.execute("CREATE EXTENSION IF NOT EXISTS vector")
     finally:
         await connection.close()
 

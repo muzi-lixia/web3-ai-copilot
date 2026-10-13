@@ -7,6 +7,7 @@
 import asyncio
 import time
 from contextlib import aclosing
+from functools import partial
 from uuid import uuid4
 
 from langchain.agents import create_agent
@@ -18,11 +19,12 @@ from langchain_core.messages import HumanMessage
 from app.agent.context import RunContext
 from app.agent.middleware import ContextBudget, LiveDataFilter
 from app.agent.models import chat_model, select_settings
+from app.agent.rag import rewrite as rewrite_query
 from app.agent.tools import TOOLS
 from app.core.exceptions import AppError, NotFoundError, RateLimitError
 from app.core.logging import get_logger, span
 
-PROMPT = """你是只读 Web3 助手，只回答本人资产与公开行情相关的问题。
+PROMPT = """你是只读 Web3 助手，回答本人资产、公开行情与平台知识库文档相关的问题。
 规则：
 1. 所有链上资产、合约数据必须调用工具获取，禁止编造数据。
 2. 不能自动执行转账、授权等任何链上交易；仅可讲解操作步骤与风险。
@@ -33,15 +35,25 @@ PROMPT = """你是只读 Web3 助手，只回答本人资产与公开行情相�
    - 「我有多少钱」「我有多少资产」问的是本人持仓，按整体持仓查询。
    - 「BERA 多少钱」这类没提「我的」才按公开行情理解。
    - BERA 与 WBERA 是不同币种，不混用。
-4. 工具选择：先根据问题判断是本人持仓还是公开行情，再阅读工具描述并按适用场景选择工具，不选错工具。
+4. 工具选择：先判断问题问的是本人持仓、公开行情还是知识库文档，再阅读工具描述并按适用场景
+   选择工具，不选错工具。
 5. 正文用自然语言说明本次结果：查到什么、金额多少、数据截止时间。所有金额、数量、时间
    必须逐字引用工具返回值，不四舍五入、不换算货币、不自行计算；工具没返回的数字不要补。
-6. 不提供投资建议；拒绝讲解盗币、合约攻击等违规内容。
-7. 不诱导用户泄露私钥、助记词。
-每次问最新余额或行情都重新调用工具，不复用旧结果；对话历史里出现过的数值不是当前数据；
-没查过的结论先查再答。
+   用知识库片段作答时，在相应句子后标出片段编号（如 [1]、[1][2]），并说明出自哪份文档；
+   编号必须与检索结果里的编号一致，不把片段当成自己的话，也不引用没有编号的内容。
+6. 回答知识库问题时只答被问到的内容：检索片段是参考资料，不逐条总结，与问题无关的功能、
+   参数、背景不提；先给直接答案，仅在理解答案必需时补充解释。片段涉及风险、限制或歧义时
+   照常说明。
+7. 不提供投资建议；拒绝讲解盗币、合约攻击等违规内容。
+8. 不诱导用户泄露私钥、助记词。
+每次问最新余额或行情都重新调用工具，不复用旧结果；知识库检索同样每问必查，不复用历史片段；
+对话历史里出现过的数值不是当前数据；没查过的结论先查再答。
 输入的[地址已隐藏]、[密钥已隐藏]、[金额已隐藏]是隐私占位符，不猜测、不还原。
 问候自然回应并简述能做什么；超出范围的请求直接说明只读范围，不多解释。"""
+
+# 对用户可见的正文只来自主模型节点：工具内部再发起的模型调用（如检索改写）分片同样会
+# 被流式捕获，归在 tools 节点下，不是本轮回答的内容。
+ANSWER_NODE = "model"
 
 
 class ChatService:
@@ -141,21 +153,28 @@ class ChatService:
             # 容量按「在跑任务 + 待补写」合计：待补写项还没真正落库，但已占用一个未完成的轮次。
             if self.stopping or len(self.tasks) + len(self.pending) >= self.settings.chat_queue_limit:
                 raise RateLimitError("等待队列已满，请稍后重试")
-            # 建轮次之前，先向基础服务确认该用户仍被允许使用 Agent。
-            await self.client.request("POST", "/auth/agent-permits", token)
+            # 换证：用用户的访问令牌换一张覆盖整轮的委托凭证，后台生成全程用它取数。
+            # 这一步同时是身份校验（令牌无效会在这里 401），且发生在建轮次之前 ——
+            # 建了轮次再失败，用户就白等一轮。
+            permit = await self.client.request("POST", "/auth/agent-permits", token)
             tid, created = await self.repository.create_turn(
                 user, conversation["id"], client_id, safe.text, display_text
             )
             if created:
                 # 生成脱离 HTTP 请求生命周期运行；done_callback 只摘除任务登记，
                 # 终态由 generate 自己负责写入（写失败则进 pending）。
-                task = asyncio.create_task(self.generate(user, conversation["id"], tid, token, safe))
+                task = asyncio.create_task(
+                    self.generate(user, conversation["id"], tid, permit["permit"], safe)
+                )
                 self.tasks[tid] = task
                 task.add_done_callback(lambda done: self.tasks.pop(tid, None))
             return dict(turn_id=tid, created=created)
 
-    async def generate(self, user, cid, tid, token, safe):
+    async def generate(self, user, cid, tid, permit, safe):
         """后台生成一轮回答；脱离 HTTP 生命周期，终态必须落库或进入待补写。
+
+        permit 是受理时换来的委托凭证，整轮取数都用它：用户令牌在生成期间过期，
+        不再让这一轮作废。
 
         状态机：排队等模型额度 → running → 终态。无论走哪条分支，finally 都要写出
         终态；写失败就登记待补写交给维护任务重试，不能让订阅端永远等一个不会到来的结果。
@@ -165,7 +184,7 @@ class ChatService:
         # 按模型调用 id 收集用量：一次调用的分片共享 id，只在收尾分片带用量，
         # 同 id 取最后一次即为该次总量，多轮工具调用不会被最后一次覆盖。
         usage_by_call: dict[str | None, tuple[int, int]] = {}
-        context = RunContext(user, cid, token, self.client, self.repository)
+        context = RunContext(user, cid, permit, self.client, self.repository)
 
         async def persist_results():
             """工具产出结果后立即落库，并唤醒订阅端重读 —— 卡片不必等 1 秒刻度。
@@ -194,7 +213,7 @@ class ChatService:
                 try:
                     # 顺序固定：先确认租约与凭证仍然有效，再把轮次从 queued 推进到 running。
                     await self.lease.verify()
-                    await self.client.identity(token)
+                    await self.client.identity(permit)
                     await self.repository.update(user, tid, "", "running", [])
                     if safe.clarification:
                         # 已在受理阶段判定不该进模型（如代币合约缺网络），直接当作最终回答，不消耗模型额度。
@@ -203,6 +222,8 @@ class ChatService:
                         # 整个 Agent 执行（含多轮工具调用）共享这一个超时；超时统一走 TimeoutError。
                         async with asyncio.timeout(self.settings.copilot_timeout_seconds):
                             async with chat_model(settings) as model:
+                                # 检索改写与 Agent 共用本轮模型实例，不另建连接。
+                                context.rewrite = partial(rewrite_query, model)
                                 agent = create_agent(
                                     model,
                                     tools=TOOLS,
@@ -247,7 +268,7 @@ class ChatService:
                                         stream_mode="messages",
                                     )
                                 ) as source:
-                                    async for message, _ in source:
+                                    async for message, metadata in source:
                                         if message.type == "AIMessageChunk":
                                             # 用量与正文无关：每次模型调用的收尾分片带用量，
                                             # 即使这一轮是去调工具也要记，否则多轮用量会漏掉前几步。
@@ -256,9 +277,11 @@ class ChatService:
                                                     message.usage_metadata.get("input_tokens", 0),
                                                     message.usage_metadata.get("output_tokens", 0),
                                                 )
-                                            # 只累计纯文本块：带 tool_call_chunks 的块是
-                                            # 「边说边调工具」的内容，计入会把调用片段混进回答。
-                                            if not message.tool_call_chunks:
+                                            # 只累计主模型节点的纯文本块：带 tool_call_chunks 的块是
+                                            # 「边说边调工具」的内容，计入会把调用片段混进回答；
+                                            # 工具内部发起的模型调用分片归 tools 节点，不是正文。
+                                            node = (metadata or {}).get("langgraph_node")
+                                            if not message.tool_call_chunks and node == ANSWER_NODE:
                                                 answer += str(message.text)
                                                 # 增量推送：把累计正文广播给本进程的订阅者，
                                                 # 速度由 stream_seconds 决定，与落库节流无关。

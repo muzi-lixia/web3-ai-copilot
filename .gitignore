@@ -30,4 +30,7 @@ dist-ssr/
 # 日志
 *.log
 
+# 知识库上传的原件（元数据在库里，文件本体不入版本库）
+backend/var/
+
 docs

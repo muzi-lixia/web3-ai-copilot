@@ -8,15 +8,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health
-from app.api.v1 import market, risk, staking, wallet
+from app.api.v1 import knowledge, market, risk, staking, wallet
 from app.core.config import get_settings
 from app.core.exception_handlers import register_exception_handlers
-from app.core.logging import TraceMiddleware, setup_logging
+from app.core.logging import TraceMiddleware, get_logger, setup_logging
 from app.core.resources import BusinessResources
 from app.foundation.api import router
 from app.foundation.auth import AuthService
 from app.foundation.results import ResultService
 from app.infrastructure.database.session import Database
+from app.modules.knowledge.service import KnowledgeService
+
+# 队列空转的间隔：上传到开始处理最多晚这么久。
+POLL_SECONDS = 1.0
 
 
 def create_app(services=None):
@@ -35,12 +39,15 @@ def create_app(services=None):
             resources=resources,
             auth=AuthService(db, settings),
             results=ResultService(db, resources),
+            knowledge=KnowledgeService(db, settings),
         )
 
     @asynccontextmanager
     async def lifespan(app):
         """启动时装配日志并拉起维护任务；关闭时取消维护并释放数据库连接。"""
-        setup_logging("DEBUG" if settings.debug else "INFO")
+        setup_logging()
+        # 上次中断时留在「处理中」的文档退回待处理，交给下面的循环重新跑。
+        await services.knowledge.recover()
 
         async def maintain():
             """周期性清理过期挑战、结果与限流桶；单次失败只记日志，不中断循环。"""
@@ -49,17 +56,27 @@ def create_app(services=None):
                 try:
                     await services.auth.cleanup()
                 except Exception:
-                    from app.core.logging import get_logger
-
                     get_logger(__name__).exception("maintenance.failed")
 
-        task = asyncio.create_task(maintain())
+        async def consume():
+            """轮询待处理文档跑离线链路；单篇失败已记在该文档上，这里只防循环中断。"""
+            while True:
+                try:
+                    if not await services.knowledge.run_pending():
+                        await asyncio.sleep(POLL_SECONDS)
+                except Exception:
+                    get_logger(__name__).exception("knowledge.consume_failed")
+                    await asyncio.sleep(POLL_SECONDS)
+
+        tasks = [asyncio.create_task(maintain()), asyncio.create_task(consume())]
         try:
             yield
         finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
             await services.database.close()
 
     app = FastAPI(title="Web3 Foundation", lifespan=lifespan)
@@ -74,7 +91,7 @@ def create_app(services=None):
     )
     app.add_middleware(TraceMiddleware, service="foundation")
     register_exception_handlers(app)
-    for r in (router, wallet.router, market.router, risk.router, staking.router):
+    for r in (router, wallet.router, market.router, risk.router, staking.router, knowledge.router):
         app.include_router(r, prefix=settings.api_prefix)
     app.include_router(health)
     return app

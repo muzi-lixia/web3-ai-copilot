@@ -55,7 +55,7 @@ def create_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
         """启动时接租约并收尾遗留轮次；关闭时先停任务、再释放客户端与连接池。"""
-        setup_logging("DEBUG" if settings.debug else "INFO")
+        setup_logging()
         enable_tracing(settings)
         db = Database(settings.agent_database_url or settings.database_url)
         client = FoundationClient(settings)

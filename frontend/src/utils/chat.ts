@@ -24,6 +24,7 @@ const ERROR_TEXT: Record<string, string> = {
   foundation_unavailable: '基础服务暂不可用，请稍后重试',
   business_query_failed: '上游查询未完成，请稍后重试',
   unauthorized: '登录状态已失效，请重新连接钱包',
+  access_expired: '登录凭证已过期，请重新登录',
   forbidden: '当前身份无权进行这次查询',
   rate_limited: '请求过于频繁，请稍后重试',
   chat_busy: '当前对话已有执行中的轮次',

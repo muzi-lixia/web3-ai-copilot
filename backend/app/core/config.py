@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     siwe_uri: str = "http://localhost:5173"
     access_token_minutes: int = Field(default=15, ge=1, le=60)
     login_session_days: int = Field(default=7, ge=1, le=30)
+    agent_permit_seconds: int = Field(default=300, ge=30, le=3600)
+    """一轮 Agent 执行的委托凭证寿命（秒）。
+
+    受理时用用户的访问令牌换一张，之后整轮取数都用它，所以它必须覆盖「排队等额度 +
+    执行」两段；启动时校验，配短了会在取数中途失效。
+    """
     foundation_url: str = "http://127.0.0.1:8000"
     conversation_ttl_hours: int = Field(default=720, ge=1)
     request_limit_per_minute: int = Field(default=60, ge=1)
@@ -145,6 +151,26 @@ class Settings(BaseSettings):
     beep_timeout_seconds: float = Field(default=10.0, gt=0)
     beep_cache_ttl: int = Field(default=300, gt=0)
     """质押年化缓存秒数。金库收益按批注入（初期每周 2~3 次），秒级刷新没意义。"""
+
+    # ── 知识库 ────────────────────────────────────────────
+    # 知识库是公共内容：登录用户都可检索，但只有运维白名单里的地址能上传。
+    admin_addresses: str = ""
+    """允许上传知识库文档的钱包地址，逗号分隔。留空即无人可传（默认最小权限）。"""
+
+    knowledge_storage_dir: str = "var/knowledge"
+    """上传原件的落盘目录，相对后端工作目录。库里只存元数据，不存文件本体。"""
+
+    knowledge_max_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    """单个上传文件的体积上限，超出直接拒绝。"""
+
+    embedding_model: str = "bge-m3:latest"
+    """生成检索向量的模型。维度必须与 knowledge_embedding_dimensions 一致。"""
+
+    embedding_base_url: str = "http://127.0.0.1:11434"
+    """生成向量的服务地址，默认本机 Ollama。走本机地址，不受环境代理影响。"""
+
+    knowledge_embedding_dimensions: int = Field(default=1024, gt=0)
+    """向量列维度。改这个值必须同时重建 chunks.embedding 列，否则写入会被拒绝。"""
 
     @model_validator(mode="after")
     def validate_production(self) -> Self:
@@ -174,6 +200,17 @@ class Settings(BaseSettings):
                 raise ValueError("生产环境必须明确配置 CORS_ORIGINS")
         return self
 
+    @model_validator(mode="after")
+    def validate_permit_lifetime(self) -> Self:
+        """委托凭证必须比最长的一轮更长寿，否则取数会跑到一半被判凭证过期。
+
+        这条与部署环境无关：它是代码里的固定关系（一轮的寿命 ≤ 委托凭证的寿命），
+        配错了不是「不安全」而是「全站不可用」，所以在所有环境都拦。
+        """
+        if self.agent_permit_seconds < self.required_permit_seconds:
+            raise ValueError("AGENT_PERMIT_SECONDS 必须覆盖一轮的最长耗时（排队 + 执行）")
+        return self
+
     @property
     def rpc_override_map(self) -> dict[int, list[str]]:
         """把 rpc_overrides 解析成 {chain_id: [url, ...]}。
@@ -196,9 +233,22 @@ class Settings(BaseSettings):
         return out
 
     @property
+    def required_permit_seconds(self) -> float:
+        """一轮最长可能占用的秒数：排队等模型额度 + 执行。
+
+        委托凭证必须覆盖这两段，任一段超出寿命都会在取数时被判凭证过期。
+        """
+        return self.chat_queue_timeout_seconds + self.copilot_timeout_seconds
+
+    @property
     def cors_origin_list(self) -> list[str]:
         """将逗号分隔的来源配置转换为列表，并去掉空项和首尾空格。"""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def admin_address_set(self) -> set[str]:
+        """把白名单解析成小写地址集合，判定时不受 checksum 大小写影响。"""
+        return {a.strip().lower() for a in self.admin_addresses.split(",") if a.strip()}
 
 
 @lru_cache

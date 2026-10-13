@@ -5,6 +5,16 @@ from pathlib import Path
 
 APP = Path(__file__).resolve().parents[1] / "app"
 
+# 拦的是 Agent 侧本身：模型编排、消息传递与图执行。
+AGENT_SIDE = ("app.agent", "langchain", "langgraph")
+
+# 名字落在 AGENT_SIDE 前缀里，但只是纯文本处理，业务层可以直接用。
+TEXT_UTILITIES = ("langchain_text_splitters",)
+
+
+def is_agent_side(module: str) -> bool:
+    return module.startswith(AGENT_SIDE) and not module.startswith(TEXT_UTILITIES)
+
 
 def imports(path):
     for node in ast.walk(ast.parse(path.read_text())):
@@ -17,7 +27,7 @@ def imports(path):
 def test_foundation_and_business_do_not_import_agent():
     for directory in ("foundation", "modules"):
         for path in (APP / directory).rglob("*.py"):
-            assert not any(m.startswith(("app.agent", "langchain", "langgraph")) for m in imports(path)), path
+            assert not any(is_agent_side(m) for m in imports(path)), path
 
 
 def test_tools_do_not_import_business_services():

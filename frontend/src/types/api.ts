@@ -246,7 +246,7 @@ export interface ChatSession {
 /* Result：一次回答里随消息下发的业务结果。信封（所有 kind 通用）+ body（按 kind 判别）。 */
 
 /** 结果种类；加新类型要动三处：这里、body、前端 ResultCard 的分发（漏了会落进兜底渲染）。 */
-export type ResultKind = 'balance' | 'price' | 'aggregate'
+export type ResultKind = 'balance' | 'price' | 'aggregate' | 'knowledge'
 export type ResultStatus = 'complete' | 'partial' | 'failed'
 
 /** 信封：只放跨类型字段，业务数据一律在 body 里。 */
@@ -299,6 +299,41 @@ export interface PriceBody {
 
 export interface BalanceResult extends ResultEnvelope { kind: 'balance'; body: BalanceBody }
 export interface PriceResult extends ResultEnvelope { kind: 'price'; body: PriceBody }
+
+/**
+ * 一条知识库命中片段。
+ *
+ * 出处与原文一起下发：用户要能自己核对「模型说的是不是这份文档里的原话」，
+ * 所以 document_id + 标题路径 + 页码 + 相似度都留着，不在前端另算。
+ */
+export interface KnowledgeHit {
+  /** 引用编号，与模型正文里写的 [1][2] 同源；两边由后端一次分配 */
+  index: number
+  document_id: string
+  /** 片在文档内的序号，与 document_id 一起唯一定位一条分片 */
+  ordinal: number
+  /** 所在的标题路径，如「Token > Methods」；非结构化来源为 null */
+  heading: string | null
+  content: string
+  /** PDF 的起止页；非 PDF 为 null */
+  page_start: number | null
+  page_end: number | null
+  /** 所属文档名与原始文件名 */
+  title: string
+  filename: string
+  /** 余弦相似度，越大越接近；只用于展示与取舍 */
+  score: number
+}
+
+/** 知识库检索类 body。 */
+export interface KnowledgeBody {
+  /** 实际用于检索的句子；多跳追问时它可能与用户原话不同 */
+  query: string
+  /** 按相似度从高到低；可能为空，空不代表出错 */
+  hits: KnowledgeHit[]
+}
+
+export interface KnowledgeResult extends ResultEnvelope { kind: 'knowledge'; body: KnowledgeBody }
 /** 合并结果：后端把多份余额结果合成一条，body 与余额完全同构，前端复用同一套渲染。 */
 export interface AggregateResult extends ResultEnvelope { kind: 'aggregate'; body: BalanceBody }
 /** 走「链级明细」渲染的结果种类；新增同构 kind 要同时扩这里和 isBalanceLike 守卫，渲染组件不动。 */
@@ -400,4 +435,41 @@ export interface TokenResponse {
 
 export interface MeResponse {
   address: string
+  user_id: string
+  /** 是否具备知识库管理权限；白名单未配置时所有人都为 false。 */
+  is_admin: boolean
+}
+
+/* ── knowledge ─────────────────────────────────────────── */
+
+/** 上传后由后台依次经过解析、切分、向量化；failed 时 error 有值。 */
+export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed'
+
+/**
+ * 知识库文档元数据。
+ *
+ * 上传返回时状态必然是 `pending` —— 正文还没解析，所以它不能当作最终结果用，
+ * 页面要靠轮询这个接口跟上进度。分片内容与向量不从这里返回。
+ */
+export interface KnowledgeDocument {
+  id: string
+  /** 文件名去掉扩展名，展示用 */
+  title: string
+  filename: string
+  mime: string
+  /** 字节数 */
+  size_bytes: number
+  status: DocumentStatus
+  /** 已入库的分片数；处理完成前为 0 */
+  chunk_count: number
+  /** 处理失败的原因；成功或尚未处理为 null */
+  error: string | null
+  /** 失败停在离线链路的哪一步（load / clean / split / embed）；未失败为 null */
+  stage: string | null
+  /** 失败码，形如 load.parse_failed，供界面按类别给文案；未失败为 null */
+  error_code: string | null
+  /** ISO 8601 */
+  created_at: string
+  /** ISO 8601 */
+  updated_at: string
 }

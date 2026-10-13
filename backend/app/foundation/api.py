@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.api.dependencies import BusinessResourcesDep
 from app.api.responses import success
 from app.common.schemas import Address
 from app.core.exceptions import UnauthorizedError
@@ -135,9 +136,15 @@ async def logout(request: Request, current: IdentityDep):
 
 
 @router.get("/users/me", tags=["身份与凭证"], summary="读取当前用户身份")
-async def me(current: IdentityDep):
-    """返回当前用户的地址与内部用户 ID，供前端展示与后续请求使用。"""
-    return success({"address": current.address, "user_id": current.user_id})
+async def me(current: IdentityDep, resources: BusinessResourcesDep):
+    """返回当前用户的地址与内部用户 ID，并标明是否具备知识库管理权限。"""
+    return success(
+        {
+            "address": current.address,
+            "user_id": current.user_id,
+            "is_admin": current.address.lower() in resources.settings.admin_address_set,
+        }
+    )
 
 
 @router.get("/auth/identity", tags=["身份与凭证"], summary="读取无地址身份投影")
@@ -221,12 +228,18 @@ async def resolve_token(body: TokenResolution, request: Request, current: Identi
     return success(await metadata(body.chain_id, body.contract, services.resources))
 
 
-@router.post("/auth/agent-permits", tags=["身份与凭证"], summary="校验 Agent 使用权限")
+@router.post("/auth/agent-permits", tags=["身份与凭证"], summary="签发一轮 Agent 执行的委托凭证")
 async def agent_permit(request: Request, current: IdentityDep):
-    """校验当前用户是否允许使用 Agent。当前只做限流+放行，作为未来的准入开关位。"""
+    """校验当前用户可用 Agent，并签发覆盖整轮执行的委托凭证。
+
+    用户令牌只需此刻有效：Agent 拿这张凭证跑完整轮取数，令牌在生成期间过期不再让这一轮
+    作废。委托凭证本身不能再签发 —— 否则 Agent 可以绕开用户令牌无限续期。
+    """
     auth = request.app.state.services.auth
+    if current.scope != "user":
+        raise UnauthorizedError("委托凭证不能再次签发")
     await auth.limit("agent:" + current.user_id, auth.settings.request_limit_per_minute)
-    return success({"allowed": True})
+    return success({"permit": auth.issue_agent_permit(current)})
 
 
 @router.get(

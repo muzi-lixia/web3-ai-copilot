@@ -22,6 +22,20 @@ class InvalidAddressError(AppError):
     code = "invalid_address"
 
 
+class BadRequestError(AppError):
+    """请求内容本身有问题（文件类型不支持等），改参数重试即可。"""
+
+    status_code = 400
+    code = "bad_request"
+
+
+class PayloadTooLargeError(AppError):
+    """上传体积超过配置上限，请求未被接受。"""
+
+    status_code = 413
+    code = "payload_too_large"
+
+
 class UpstreamError(AppError):
     """外部依赖失败：RPC 全部节点不可用 / 行情源全部不可用且无缓存可降级。"""
 

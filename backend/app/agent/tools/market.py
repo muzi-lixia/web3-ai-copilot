@@ -12,7 +12,7 @@ from app.core.logging import span
 
 @tool(
     args_schema=ChainArguments,
-    description="查询平台支持的链 ID 与代币清单，回答「支持哪些链/币」这类问题；不查本人持仓。",
+    description="查询平台支持的链列表及对应代币清单，回答「支持哪些链/币」这类问题；仅返回平台公开配置信息，不查询用户任何钱包持仓、余额。可选传入chain_id，用于查询指定一条链的信息。",
 )
 async def get_chain_info(runtime: ToolRuntime[RunContext], chain_id: int | None = None):
     """读取公开网络配置。
@@ -29,9 +29,9 @@ async def get_chain_info(runtime: ToolRuntime[RunContext], chain_id: int | None 
 
 @tool(
     args_schema=BalanceArguments,
-    description="查询公开代币行情价格，回答「X 多少钱」。这是市场价格，不是用户余额；"
-    "问「我有多少 X」应改用 get_my_token_balance。"
-    "每次询问都必须重新调用，不得沿用对话历史中的行情。",
+    description="""查询代币公开市场行情价格，用于回答「X 多少钱」。该数据为市场价格，不是用户钱包持仓余额。
+                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。
+                每次调用实时拉取最新行情，无缓存，不可复用对话历史内旧行情数据。""",
 )
 async def get_token_price(
     symbol: str, runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
