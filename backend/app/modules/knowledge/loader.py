@@ -244,8 +244,9 @@ def _load_docx(content: bytes) -> list[LoadedBlock]:
             # 跳过空段
             if not text:
                 continue
+            style = paragraph.style
             # 判断标题级别
-            level = _heading_level(paragraph.style.name)
+            level = _heading_level(style.name) if style is not None else None
             # 如果不是标题
             if level is None:
                 # 处理普通段落
@@ -264,6 +265,8 @@ def _load_docx(content: bytes) -> list[LoadedBlock]:
 
 def _heading_level(style: str) -> int | None:
     """从样式名取出标题级别，不是标题样式则返回 None。"""
+    if not style:
+        return None
     prefix, _, number = style.rpartition(" ")
     if prefix in HEADING_PREFIXES and number.isdigit():
         return int(number)
