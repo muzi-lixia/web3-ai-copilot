@@ -19,7 +19,11 @@ SEARCH_LIMIT = 5
 class SearchArguments(Arguments):
     """检索参数：一句自然语言问题。"""
 
-    query: str = Field(min_length=1, max_length=1000, description="要查找的内容，用整句话描述")
+    query: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="要查找的内容，用整句话描述；必须脱离对话也能独立看懂，指代词先换成具体名字",
+    )
 
 
 @tool(

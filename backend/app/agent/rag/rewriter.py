@@ -49,6 +49,9 @@ RESULT_CHARS = 200
 # 首次尝试 + 一次重试。再多只是把整轮预算耗在改写上，不如直接退回原问题。
 ATTEMPTS = 2
 
+# 问题里出现这些词，就认为它还不能独立检索；只有这类问题才值得再调一次模型。
+PRONOUNS = ("它", "他", "她", "这", "那", "此", "上面", "上述", "前者", "后者", "刚才")
+
 
 class RewriteResult(BaseModel):
     """改写结果：供检索使用的句子，以及它是否与原问题不同。"""
@@ -68,6 +71,15 @@ class _Draft(BaseModel):
         max_length=RESULT_CHARS,
         description="脱离对话也能独立检索的一句话，只补指代与省略信息、不扩写",
     )
+
+
+def needs_rewrite(query: str) -> bool:
+    """问题里是否还有指代词。
+
+    「其他」「其它」里的「他」不是指代，先去掉再判。
+    """
+    text = query.replace("其他", "").replace("其它", "")
+    return any(word in text for word in PRONOUNS)
 
 
 def fallback(query: str) -> RewriteResult:
@@ -116,11 +128,11 @@ def _record(model, started: float, *, status: str, reason: str | None, rewritten
 
 
 async def rewrite(model, query, history, timeout=TIMEOUT_SECONDS) -> RewriteResult:
-    """改写查询；没有历史或任何一步失败都返回原问题，并记为未改写。
+    """改写查询；没有历史、问题里没有指代词、或任何一步失败，都返回原问题并记为未改写。
 
     model 用本轮 Agent 的实例，不另建连接。
     """
-    if not history:
+    if not history or not needs_rewrite(query):
         return fallback(query)
     # 用替换而不是格式化：用户问题里的花括号不该被当成占位符。
     prompt = INSTRUCTION.replace("{history}", history).replace("{query}", query)
