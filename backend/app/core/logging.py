@@ -35,6 +35,7 @@ FIELDS = frozenset(
         "document_id",
         "stage",
         "kind",
+        "rewritten",
     }
 )
 

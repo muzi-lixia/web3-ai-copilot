@@ -4,9 +4,14 @@
 """
 
 import asyncio
+import time
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
+
+from app.core.logging import get_logger
+
+LOGGER = get_logger(__name__)
 
 # 补指代与省略掉的主语、对象。
 INSTRUCTION = """请将下面给定的「最新问题」改写成一句脱离当前对话也能独立检索的完整问题。
@@ -92,6 +97,24 @@ def recent_dialogue(messages, limit=HISTORY_MESSAGES) -> str:
     return "\n".join(lines)
 
 
+def _record(model, started: float, *, status: str, reason: str | None, rewritten: bool) -> None:
+    """记一次改写的结果：拿到模型结果还是退回原话、退回的原因、以及有没有改动。
+
+    只在日志里区分：返回值上「退回原话」与「模型判定无需改写」都是 `rewritten=False`，
+    不记这一笔就分不出改写是生效了还是被放弃了。
+    """
+    LOGGER.info(
+        "rewrite.completed",
+        extra={
+            "status": status,
+            "error_code": reason,
+            "rewritten": rewritten,
+            "model": getattr(model, "model_name", "") or getattr(model, "model", ""),
+            "duration_ms": round((time.monotonic() - started) * 1000, 2),
+        },
+    )
+
+
 async def rewrite(model, query, history, timeout=TIMEOUT_SECONDS) -> RewriteResult:
     """改写查询；没有历史或任何一步失败都返回原问题，并记为未改写。
 
@@ -106,6 +129,8 @@ async def rewrite(model, query, history, timeout=TIMEOUT_SECONDS) -> RewriteResu
     quiet = model.model_copy(update={"disable_streaming": True})
     structured = quiet.with_structured_output(_Draft)
     original = query.strip()
+    started = time.monotonic()
+    reason = None
     try:
         # 重试与首次尝试共用同一份超时预算：不能因为重试把整轮时间拖穿。
         async with asyncio.timeout(timeout):
@@ -113,12 +138,20 @@ async def rewrite(model, query, history, timeout=TIMEOUT_SECONDS) -> RewriteResu
                 try:
                     draft = await structured.ainvoke(prompt)
                 except Exception:
+                    reason = "structured_failed"
                     continue
                 if draft is None:
+                    reason = "empty_draft"
                     continue
                 text = draft.query.strip()
                 if text:
-                    return RewriteResult(query=text, rewritten=text != original)
+                    changed = text != original
+                    _record(model, started, status="success", reason=None, rewritten=changed)
+                    return RewriteResult(query=text, rewritten=changed)
+                reason = "empty_draft"
+    except TimeoutError:
+        reason = "timeout"
     except Exception:
-        pass
+        reason = "unexpected"
+    _record(model, started, status="failed", reason=reason, rewritten=False)
     return fallback(query)
