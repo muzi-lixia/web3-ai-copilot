@@ -7,8 +7,8 @@
 退出码 0 通过，1 有用例未通过或相对基线退化，2 环境不可用。
 
 执行顺序固定：探活 → 逐层跑 → 打印 → 比基线 → 定退出码。
-探活放在最前面，是为了让「数据库 / 向量化服务没起」这类环境问题
-一眼看出来，而不是让它表现成一堆用例失败。
+探活按这次要跑的层检查依赖，放在最前面，是为了让「数据库 / 向量化服务 / 模型没起」
+这类环境问题一眼看出来，而不是让它表现成一堆用例失败。
 """
 
 import argparse
@@ -17,39 +17,106 @@ import asyncio
 import httpx
 from sqlalchemy import text
 
+from app.agent.models import ENDPOINTS, select_settings
 from app.core.config import get_settings
+from app.core.exceptions import AppError
 from app.infrastructure.database.session import Database
 from app.modules.knowledge.service import KnowledgeService
 from evals import report as report_module
-from evals import retrieval
+from evals import retrieval, rewrite, routing
 
 # 已实现的层；新增一层就在这里登记，入口不用改。
 # 键是层的 ascii 名（与 Report.key、基线文件的键一致），值是那一层的 async run()。
-LAYERS = {"retrieval": retrieval.run}
+LAYERS = {"retrieval": retrieval.run, "rewrite": rewrite.run, "routing": routing.run}
 
 
-async def _probe(settings, database) -> str | None:
-    """执行前先探活：缺哪一项就直说，别让它表现成用例失败。
-
-    两项检查，返回第一条失败原因，都通过时返回 None：
-    - 数据库能不能连（跑一句 `SELECT 1`）；
-    - 向量化服务在不在（打它的 `/api/tags`，这是检索的必要依赖）。
-    """
+async def _probe_database(database) -> str | None:
+    """数据库能不能连：检索层要读语料，连不上后面全是失败。"""
     try:
         async with database.sessions() as session:
             await session.execute(text("SELECT 1"))
     except Exception as error:
         return f"数据库不可用：{type(error).__name__}: {error}"
+    return None
+
+
+async def _probe_embedding(settings) -> str | None:
+    """向量化服务在不在：检索的必要依赖，打它的 `/api/tags`。
+
+    `trust_env=False`：不读环境变量里的代理设置，直连本机向量化服务。
+    200 才算活着：能连通但返回错误码时同样不能开始评估。
+    """
     url = f"{settings.embedding_base_url.rstrip('/')}/api/tags"
     try:
-        # trust_env=False：不读环境变量里的代理设置，直连本机向量化服务。
         async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
             response = await client.get(url)
     except httpx.HTTPError as error:
         return f"向量化服务不可用（{url}）：{error}"
-    # 200 才算活着：能连通但返回错误码时同样不能开始评估。
     if response.status_code != 200:
         return f"向量化服务返回 {response.status_code}（{url}）"
+    return None
+
+
+async def _probe_model(settings, provider) -> str | None:
+    """模型服务在不在，以及这一层要用的那个模型在不在。
+
+    `provider` 为空表示部署配置的主模型。本地服务打 `/api/tags` 看模型清单，
+    云端打 `/models`（用配置里的密钥鉴权）—— 两者都只列清单，不产生生成费用。
+    `trust_env=False`：不读环境变量里的代理设置，免得探活被代理挡住而模型本身可用。
+    """
+    try:
+        chosen = select_settings(settings, provider)
+    except AppError as error:
+        return f"模型配置不可用：{error}"
+    base = (chosen.model_base_url or ENDPOINTS[chosen.model_provider]).rstrip("/")
+    if chosen.model_provider == "ollama":
+        try:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                response = await client.get(f"{base}/api/tags")
+        except Exception as error:
+            return f"模型服务不可用（{base}）：{type(error).__name__}: {error}"
+        if response.status_code != 200:
+            return f"模型服务返回 {response.status_code}（{base}）"
+        names = {item.get("name", "") for item in response.json().get("models", [])}
+        if chosen.model_name not in names:
+            return f"本地没有要用的模型（{base} 缺 {chosen.model_name}）"
+        return None
+    headers = {"Authorization": f"Bearer {chosen.model_api_key.get_secret_value()}"}
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0, trust_env=False, headers=headers, proxy=chosen.model_proxy or None
+        ) as client:
+            response = await client.get(f"{base}/models")
+    except Exception as error:
+        return f"模型服务不可用（{base}）：{type(error).__name__}: {error}"
+    if response.status_code != 200:
+        return f"模型服务返回 {response.status_code}（{base}）"
+    names = {item.get("id", "") for item in response.json().get("data", [])}
+    if chosen.model_name not in names:
+        return f"模型清单里没有 {chosen.model_name}（{base}）"
+    return None
+
+
+async def _probe(settings, database, layer_names) -> str | None:
+    """执行前按这次要跑的层探活：缺哪一项就直说，别让它表现成用例失败。
+
+    只检查真会跑到的依赖，逐项返回第一条失败原因，都通过时返回 None：
+    - 检索层：数据库能连、向量化服务在；
+    - 改写层：它固定要用的本地改写模型在；
+    - 路由层：部署配置的主模型在（只列清单，不调生成）。
+    """
+    if "retrieval" in layer_names:
+        problem = await _probe_database(database) or await _probe_embedding(settings)
+        if problem:
+            return problem
+    if "rewrite" in layer_names:
+        problem = await _probe_model(settings, rewrite.PROVIDER)
+        if problem:
+            return problem
+    if "routing" in layer_names:
+        problem = await _probe_model(settings, None)
+        if problem:
+            return problem
     return None
 
 
@@ -58,7 +125,7 @@ async def main(layer_names: list[str], update_baseline: bool) -> int:
     settings = get_settings()
     database = Database(settings.foundation_database_url or settings.database_url)
     try:
-        problem = await _probe(settings, database)
+        problem = await _probe(settings, database, layer_names)
         if problem:
             print(f"评估无法开始：{problem}")
             return 2

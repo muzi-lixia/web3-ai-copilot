@@ -28,5 +28,42 @@
       "imarket-settlement": 1,
       "imarket-redirect": 1
     }
+  },
+  "rewrite": {
+    "passed": 4,
+    "evaluated": 8,
+    "metrics": {
+      "改写率": 0.25
+    },
+    "ranks": {
+      "rewrite-pronoun-assistant": 1,
+      "rewrite-elliptical-subject": null,
+      "rewrite-pronoun-user": 1,
+      "rewrite-no-history": 1,
+      "rewrite-standalone-with-history": 1,
+      "rewrite-topic-carry": null,
+      "rewrite-long-history": null,
+      "rewrite-alias-carry": null
+    }
+  },
+  "routing": {
+    "passed": 13,
+    "evaluated": 13,
+    "metrics": {},
+    "ranks": {
+      "route-knowledge-after-asset-turn": 1,
+      "route-knowledge-concept": 1,
+      "route-knowledge-parameter": 1,
+      "route-knowledge-howto": 1,
+      "route-knowledge-limit": 1,
+      "route-balance-overview": 1,
+      "route-balance-token": 1,
+      "route-balance-after-knowledge-turn": 1,
+      "route-price-plain": 1,
+      "route-price-after-knowledge-turn": 1,
+      "route-chain-list": 1,
+      "route-greeting": 1,
+      "route-out-of-scope": 1
+    }
   }
 }

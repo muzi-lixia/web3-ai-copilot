@@ -86,3 +86,176 @@ def load_retrieval_cases(path: Path | None = None) -> list[RetrievalCase]:
     if not cases:
         raise ValueError(f"{source} 里没有任何用例")
     return cases
+
+
+@dataclass(frozen=True)
+class RewriteCase:
+    """一条改写用例。
+
+    断言只落在「改写后的问题」上：要么必须带上某些字（`expect_any`），要么必须与
+    用户原话一致（`expect_same`）。不锁措辞 —— 换模型只要该补的指代补上了、
+    不该改的没乱改，就该通过。
+
+    字段：
+    - `name`        用例名，报告与基线比对都按它定位，必须唯一。
+    - `history`     本轮之前的对话，(角色, 内容) 按顺序排列；角色只取 user / assistant。
+    - `query`       用户这一轮的原话，就是要被改写的那句。
+    - `expect_any`  改写结果里必须出现其中任意一条；可为空。
+    - `expect_same` 期望改写结果与 `query` 一致（忽略首尾空白与末尾标点）。
+    - `expected_fail`
+      标的是**已知缺口**：期望合理、当前模型确实做不到，且原因写在 note 里。
+      它不把整轮判成失败；等它真能通过了，报告会提醒移除这个标记。
+    - `note`        备注，只在「已知缺口」段落里展示。
+
+    frozen=True：用例从文件读入后只读，避免执行过程中被判定逻辑改掉。
+    """
+
+    name: str
+    history: tuple[tuple[str, str], ...]
+    query: str
+    expect_any: tuple[str, ...]
+    expect_same: bool = False
+    expected_fail: bool = False
+    note: str = ""
+
+
+def _history_pair(entry: dict, name: str) -> tuple[str, str]:
+    """把 TOML 里的一条历史写成 (角色, 内容)。
+
+    角色只收 user / assistant：拼消息时靠角色决定是人还是助手说的，
+    写别的角色拼不出来，直接报错比默默跳过一条好。
+    """
+    role = str(entry.get("role") or "")
+    if role not in ("user", "assistant"):
+        raise ValueError(f"用例 {name} 的历史角色只能是 user / assistant：{role!r}")
+    return role, str(entry.get("content") or "")
+
+
+def load_rewrite_cases(path: Path | None = None) -> list[RewriteCase]:
+    """读改写用例并校验；缺问题或缺期望直接报错，不静默跳过一条用例。
+
+    传 `path` 可以读指定的用例文件，省略则读 `cases/rewrite.toml`。
+    校验规则（任一不满足都抛 ValueError）：
+    - 文件里至少要有一条用例；
+    - `name` 不能为空、也不能重复 —— 报告与基线都按名字定位，重名会互相覆盖；
+    - `query` 不能为空，且 `expect_any` 与 `expect_same` 至少要有一个；
+    - `history` 里的角色只能是 user / assistant。
+    """
+    source = path or CASES_DIR / "rewrite.toml"
+    raw = tomllib.loads(source.read_text(encoding="utf-8"))
+    cases: list[RewriteCase] = []
+    seen: set[str] = set()
+    # TOML 里每条用例写成一个 [[case]] 表，这里按文件里的出现顺序逐条读入。
+    for item in raw.get("case", []):
+        name = str(item.get("name") or "")
+        if not name or name in seen:
+            raise ValueError(f"用例名缺失或重复：{name!r}")
+        seen.add(name)
+        query = str(item.get("query") or "")
+        # expect_any 允许写多条；缺省成空元组，表示只看有没有乱改。
+        expect_any = tuple(str(text) for text in item.get("expect_any") or ())
+        expect_same = bool(item.get("expect_same", False))
+        # 只写问题、不写任何期望的用例无法判定，直接报错而不是当成必然失败。
+        if not query or not (expect_any or expect_same):
+            raise ValueError(f"用例 {name} 缺少问题或期望")
+        cases.append(
+            RewriteCase(
+                name=name,
+                history=tuple(_history_pair(entry, name) for entry in item.get("history") or ()),
+                query=query,
+                expect_any=expect_any,
+                expect_same=expect_same,
+                expected_fail=bool(item.get("expected_fail", False)),
+                note=str(item.get("note") or ""),
+            )
+        )
+    if not cases:
+        raise ValueError(f"{source} 里没有任何用例")
+    return cases
+
+
+@dataclass(frozen=True)
+class RoutingCase:
+    """一条工具路由用例。
+
+    断言落在「这一轮该调哪个工具」上，不看措辞也不看参数 —— 参数填得对不对由各工具
+    自己的校验兜住，不在这一层量。三条期望至少要写一条，只写问题不写期望无从判定。
+
+    字段：
+    - `name`        用例名，报告与基线比对都按它定位，必须唯一。
+    - `query`       用户这一轮的原话。
+    - `history`     本轮之前的对话，(角色, 内容) 按顺序排列；角色只取 user / assistant。
+    - `expect_tools`
+      首轮必须调用其中至少一个。写「至少一个」而不是「全部」：一个问题常有单个
+      工具就能答完，要求全调会把「多调了」也判成错，那不是这一层要量的东西。
+    - `forbid_tools`
+      首轮不允许出现其中任何一个。与上一条的方向相反，用来卡住那些「看起来相近、
+      其实答不了」的工具。
+    - `expect_no_tools`
+      首轮不该调用任何工具；与 `expect_tools` 互斥，写在一起无从判定。
+    - `expected_fail`
+      标的是**已知缺口**：期望合理、当前模型确实选不对，且原因写在 note 里。
+      它不把整轮判成失败；等它真能选对了，报告会提醒移除这个标记。
+    - `note`       备注，只在「已知缺口」段落里展示。
+
+    frozen=True：用例从文件读入后只读，避免执行过程中被判定逻辑改掉。
+    """
+
+    name: str
+    query: str
+    history: tuple[tuple[str, str], ...]
+    expect_tools: tuple[str, ...]
+    forbid_tools: tuple[str, ...]
+    expect_no_tools: bool = False
+    expected_fail: bool = False
+    note: str = ""
+
+
+def load_routing_cases(path: Path | None = None) -> list[RoutingCase]:
+    """读路由用例并校验；缺问题或缺期望直接报错，不静默跳过一条用例。
+
+    传 `path` 可以读指定的用例文件，省略则读 `cases/routing.toml`。
+    校验规则（任一不满足都抛 ValueError）：
+    - 文件里至少要有一条用例；
+    - `name` 不能为空、也不能重复 —— 报告与基线都按名字定位，重名会互相覆盖；
+    - `query` 不能为空，且三条期望至少要写一条；
+    - `expect_no_tools` 不能与 `expect_tools` 同时写：一个要求不调、一个要求必调；
+    - `history` 里的角色只能是 user / assistant。
+
+    工具名对不对不在这里查：那需要工具注册表，本模块只读用例文件。
+    """
+    source = path or CASES_DIR / "routing.toml"
+    raw = tomllib.loads(source.read_text(encoding="utf-8"))
+    cases: list[RoutingCase] = []
+    seen: set[str] = set()
+    # TOML 里每条用例写成一个 [[case]] 表，这里按文件里的出现顺序逐条读入。
+    for item in raw.get("case", []):
+        name = str(item.get("name") or "")
+        if not name or name in seen:
+            raise ValueError(f"用例名缺失或重复：{name!r}")
+        seen.add(name)
+        query = str(item.get("query") or "")
+        # 两条工具名清单都缺省成空元组，表示不设要求。
+        expect_tools = tuple(str(text) for text in item.get("expect_tools") or ())
+        forbid_tools = tuple(str(text) for text in item.get("forbid_tools") or ())
+        expect_no_tools = bool(item.get("expect_no_tools", False))
+        # 只写问题、不写任何期望的用例无法判定，直接报错而不是当成必然失败。
+        if not query or not (expect_tools or forbid_tools or expect_no_tools):
+            raise ValueError(f"用例 {name} 缺少问题或期望")
+        if expect_no_tools and expect_tools:
+            raise ValueError(f"用例 {name} 同时要求「必调」与「不调」，无法判定")
+        cases.append(
+            RoutingCase(
+                name=name,
+                query=query,
+                history=tuple(_history_pair(entry, name) for entry in item.get("history") or ()),
+                expect_tools=expect_tools,
+                forbid_tools=forbid_tools,
+                expect_no_tools=expect_no_tools,
+                expected_fail=bool(item.get("expected_fail", False)),
+                note=str(item.get("note") or ""),
+            )
+        )
+    if not cases:
+        raise ValueError(f"{source} 里没有任何用例")
+    return cases

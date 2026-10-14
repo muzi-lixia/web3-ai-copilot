@@ -1,0 +1,106 @@
+# 改写层用例：多轮追问里的指代与省略，经改写后要能脱离上下文独立检索。
+#
+# 断言只落在「改写后的问题」上，不锁措辞：
+#   expect_any   改写结果里必须出现其中任意一条（补指代 = 把实体名带上）
+#   expect_same  改写结果与用户原话一致（忽略首尾空白与末尾标点），
+#                用来量「不必要改写率」—— 问题本身已完整时不该动它
+#
+# 历史只写用户与助手的文本，不含工具往返：改写只需要知道聊过什么。
+# `query` 就是本轮原话，执行时由层拼成最后一条消息，用例里不用重复写。
+#
+# 每条用例的字段：
+#   name          用例名，报告与基线都按它定位，必须唯一
+#   history       本轮之前的对话，[{role="user", content="…"}, {role="assistant", content="…"}]
+#   query         用户这一轮的原话，就是要被改写的那句
+#   expect_any    改写结果里必须出现其中任意一条（可写多条）
+#   expect_same   期望与 query 一致，缺省 false
+#   expected_fail 是否属于已知缺口，缺省 false
+#   note          备注，只在「已知缺口」与未通过段落里展示
+#
+# expect_any 与 expect_same 至少要写一个，只写问题不写期望无法判定。
+
+# 指代指向助手回答里的实体：历史末句才出现 sWBERA，「它」必须补成它。
+[[case]]
+name = "rewrite-pronoun-assistant"
+history = [
+    { role = "user", content = "BERA 质押能拿到什么" },
+    { role = "assistant", content = "质押 BERA 会得到 sWBERA，它按 ERC-4626 表示你在质押金库里的份额。" },
+]
+query = "那它的解锁期呢"
+expect_any = ["sWBERA"]
+note = "指代指向助手回答里的实体"
+
+# 省略主语、句中没有指代词：对象只能靠历史补。
+[[case]]
+name = "rewrite-elliptical-subject"
+history = [
+    { role = "user", content = "Reward Vault 是怎么发 WBERA 的" },
+    { role = "assistant", content = "奖励按 rewardsDuration 或 target rate 两种模式之一下发。" },
+]
+query = "那发放周期是谁定的"
+expect_any = ["Reward Vault"]
+note = "无指代词的主语省略；小模型最容易在这里把对象丢掉"
+
+# 指代指向用户自己提过的专有名词。
+[[case]]
+name = "rewrite-pronoun-user"
+history = [
+    { role = "user", content = "BeaconKit 在 Berachain 里是什么角色" },
+    { role = "assistant", content = "BeaconKit 是一套构建 EVM 共识客户端的模块化框架。" },
+]
+query = "那它跟普通 EVM 客户端有什么区别"
+expect_any = ["BeaconKit"]
+note = "指代指向用户提过的专有名词"
+
+# 无历史即短路：改写器直接返回原话，连模型都不调。这条不该失败。
+[[case]]
+name = "rewrite-no-history"
+query = "Berachain 的共识机制是什么"
+expect_same = true
+note = "无历史的短路路径；失败说明短路被破坏了"
+
+# 历史在场但问题已完整：改写器应原样返回，量的是「不必要改写率」。
+[[case]]
+name = "rewrite-standalone-with-history"
+history = [
+    { role = "user", content = "质押 BERA 会得到什么" },
+    { role = "assistant", content = "会得到 sWBERA。" },
+]
+query = "BeaconKit 是什么"
+expect_same = true
+note = "问题不含指代，不该被改写"
+
+# 补出的句子要带上被问的对象，否则检索不到白名单规则。
+[[case]]
+name = "rewrite-topic-carry"
+history = [
+    { role = "user", content = "激励代币是怎么进到激励市场里的" },
+    { role = "assistant", content = "参与者要先把代币加进白名单，BeraChef 才会把它算进分配。" },
+]
+query = "那最多能加几个"
+expect_any = ["白名单"]
+note = "被问对象只在助手回答里出现"
+
+# 实体在历史末句、历史较长：历史窗口够不够用，这条能看出来。
+[[case]]
+name = "rewrite-long-history"
+history = [
+    { role = "user", content = "WBERA 是什么" },
+    { role = "assistant", content = "WBERA 是包装后的 BERA。" },
+    { role = "user", content = "能拿它做什么" },
+    { role = "assistant", content = "可以质押进 Reward Vault，按份额分到奖励。" },
+]
+query = "那收益是怎么算的"
+expect_any = ["Reward Vault"]
+note = "两条往返之后才出现的实体，检验历史窗口是否够用"
+
+# 同一个机制的两种叫法，任一带上即可（中文说法与英文缩写都算对）。
+[[case]]
+name = "rewrite-alias-carry"
+history = [
+    { role = "user", content = "Berachain 的机制和别的链有什么不一样" },
+    { role = "assistant", content = "它的 PoL 让验证者和应用共享排放，奖励流向真正被使用的资产。" },
+]
+query = "上面说的那个机制和普通流动性挖矿差在哪"
+expect_any = ["PoL", "流动性证明"]
+note = "「那个机制」的两种叫法都算命中"
