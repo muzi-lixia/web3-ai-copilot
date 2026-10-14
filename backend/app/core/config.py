@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     model_provider: Literal["ollama", "deepseek", "qwen"] = "ollama"
     model_name: str = "qwen2.5:7b"
     model_base_url: str = ""
+    # 检索改写单独指定提供方；留空表示与主模型共用同一个实例。
+    rewrite_provider: Literal["", "ollama", "deepseek", "qwen"] = ""
     # 云端模型独立显式代理；留空直连，不读取 HTTP_PROXY/HTTPS_PROXY。
     model_proxy: str = Field(default="", repr=False)
     model_api_key: SecretStr = SecretStr("")

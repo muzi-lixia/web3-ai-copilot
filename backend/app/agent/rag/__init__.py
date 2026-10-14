@@ -3,6 +3,6 @@
 from app.agent.rag.citations import build as label_hits
 from app.agent.rag.context_builder import build as build_context
 from app.agent.rag.reranker import rerank
-from app.agent.rag.rewriter import recent_dialogue, rewrite
+from app.agent.rag.rewriter import RewriteResult, recent_dialogue, rewrite
 
-__all__ = ["build_context", "label_hits", "recent_dialogue", "rerank", "rewrite"]
+__all__ = ["RewriteResult", "build_context", "label_hits", "recent_dialogue", "rerank", "rewrite"]

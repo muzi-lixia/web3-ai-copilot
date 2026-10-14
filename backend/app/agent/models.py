@@ -50,6 +50,31 @@ async def chat_model(settings):
         yield model
 
 
+@asynccontextmanager
+async def chat_models(settings):
+    """打开本轮要用的模型：主模型、改写模型、改写模型自己的配置。
+
+    改写未配置独立提供方（`settings.rewrite_provider` 为空）、或配的就是主模型的提供方时，
+    改写与主模型共用同一个实例，不另建连接。
+    """
+    async with chat_model(settings) as model:
+        provider = settings.rewrite_provider
+        if not provider or provider == settings.model_provider:
+            yield model, model, settings
+            return
+        chosen = select_settings(settings, provider)
+        async with chat_model(chosen) as rewriter:
+            yield model, rewriter, chosen
+
+
+def without_thinking(model, settings):
+    """返回关闭思考链的模型副本；提供方不支持该参数时原样返回。"""
+    if settings.model_provider != "qwen":
+        return model
+    body = {**(model.extra_body or {}), "enable_thinking": False}
+    return model.model_copy(update={"extra_body": body})
+
+
 def select_settings(settings, provider):
     """返回每轮独立配置快照；只允许已由部署配置启用的模型，不接受 URL 或 API Key。"""
     from app.core.exceptions import ForbiddenError

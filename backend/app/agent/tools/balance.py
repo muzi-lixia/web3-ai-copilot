@@ -25,12 +25,13 @@ class AggregateArguments(Arguments):
     description="""查询当前钱包预收录代币的余额概览。
                 能力限制：仅查询预收录代币，无法查询未收录合约代币、部分NFT；每次调用实时拉取链上数据，无缓存，不能复用历史余额结果。
                 适用场景：用户查询全部持仓汇总、整体资产概览，未指定单个或多个代币。
-                禁止场景：用户明确点名查询一个/多个指定币种（如查USDC余额、ETH持仓），此时必须调用 get_my_token_balance，禁止调用本工具。""",
+                禁止场景：用户明确点名查询一个/多个指定币种（如查USDC余额、ETH持仓），此时必须调用 get_my_token_balance，禁止调用本工具；其他未指明查询余额概览的场景禁止使用""",
 )
 async def get_my_balance_overview(
     runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
 ):
     """查询本人已登记代币余额概览。
+                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。其他未指明查询行情价格的场景禁止使用。
 
     Args:
         runtime: 框架注入的可信身份及 HTTP 客户端，模型不可填写。
@@ -46,7 +47,7 @@ async def get_my_balance_overview(
     args_schema=BalanceArguments,
     description="""查询本人指定单个币种的余额。
                 适用场景：用户询问「我的余额」「我有多少 X」「我持有多少X」时使用。
-                禁止场景：仅询问「X 多少钱」时，改用 get_token_price。查询全部钱包资产汇总概览时，改用 get_my_balance_overview。
+                禁止场景：仅询问「X 多少钱」时，改用 get_token_price。查询全部钱包资产汇总概览时，改用 get_my_balance_overview。其他未指明查询用户余额的场景禁止使用。
                 特殊规则：BERA与WBERA相互独立，不会自动互相转换；严格按用户指定币种查询，不猜测，不扩大范围。
                 每次调用实时拉取链上数据，不得沿用对话历史中的旧余额。""",
 )
@@ -54,6 +55,7 @@ async def get_my_token_balance(
     symbol: str, runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
 ):
     """查询指定代币余额，身份只能来自运行上下文。
+                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。其他未指明查询用户余额的场景禁止使用。
 
     Args:
         symbol: 用户明确指定的符号。
@@ -82,10 +84,11 @@ async def get_my_token_balance(
     args_schema=AggregateArguments,
     description="""汇总当前对话已存在的查询结果引用，后端完成去重与金额求和，模型不参与金额计算、不填写金额。
                 适用场景：用户明确要求合并本次对话前面几次查询到得到的结果。
-                约束：仅可传入当前用户、当前对话下有效的result_ids，禁止编造不存在的result_ids。""",
+                约束：仅可传入当前用户、当前对话下有效的result_ids，禁止编造不存在的result_ids。其他未指明汇总结果的场景禁止使用。""",
 )
 async def aggregate_results(result_ids: list[str], runtime: ToolRuntime[RunContext], currency: str = "USD"):
     """汇总已经生成的业务结果。
+                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。其他未指明查询用户余额的场景禁止使用。
 
     Args:
         result_ids: 必须属于当前用户当前对话，不能凭空编造。

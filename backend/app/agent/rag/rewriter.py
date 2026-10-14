@@ -1,25 +1,33 @@
 """检索前的查询改写：把多轮里的追问补成能独立检索的句子。
 
-改写是「有时更好」的优化，不是取数链路的一环：模型不可用、超时或返回空，
-一律退回原问题，绝不因为改写失败而让检索失败。
+没有历史、超时或调用失败时一律退回原问题，改写失败不影响检索。
 """
 
 import asyncio
 
 from langchain_core.messages import BaseMessage
+from pydantic import BaseModel, Field
 
-# 只补指代、不扩写：扩写会往问题里加原本没有的主题，把检索带偏。
-INSTRUCTION = """把「最新问题」改写成脱离上面的对话也能独立检索的一句话。
+# 补指代与省略掉的主语、对象。
+INSTRUCTION = """请将下面给定的「最新问题」改写成一句脱离当前对话也能独立检索的完整问题。
 
-规则：
-- 只补全指代的含义（「它」「这个」指的是什么），不改变提问意图，不添加新主题。
-- 最新问题本身已经完整、可以独立检索时，原样返回。
-- 只输出改写后的那一句，不要解释、不要加引号、不要分点。
+改写规则：
+- 补全指代（例如「它」「这个」「上面说的」「那」「那它」具体指什么），以及省略掉的主语或对象。
+- 只能使用对话中明确出现过的信息进行补全，不得引入对话中未出现的实体。
+- 不改变提问意图，不添加新主题，不回答问题。
+- 「要不要改写」不看读起来通不通：先看「最新问题」里有没有指代词（它、这个、那个、上面
+  说的…）或省略掉的对象（只说动作、不说对象，如「那最多能加几个」）。占了一条就必须补成
+  对话里出现过的具体名字，不能原样返回；两条都不占才原样返回。
 
-对话：
+对话内容：
 {history}
 
-最新问题：{query}"""
+最新问题：
+{query}
+
+输出要求：
+- 若无需改写，则直接原样输出「最新问题」；「无需改写」按上面那条客观判定，不是凭读起来是否通顺。
+- 若因缺少必要信息而无法补全，则在保持不引入新信息的前提下，输出尽量完整、可独立检索的版本。"""
 
 # 改写必须能被超时掐断：它占的是整轮生成的时间预算。
 TIMEOUT_SECONDS = 8.0
@@ -33,14 +41,39 @@ HISTORY_CHARS = 200
 # 改写结果的长度上限；超过这个长度就是在解释，不是在改写。
 RESULT_CHARS = 200
 
+# 首次尝试 + 一次重试。再多只是把整轮预算耗在改写上，不如直接退回原问题。
+ATTEMPTS = 2
+
+
+class RewriteResult(BaseModel):
+    """改写结果：供检索使用的句子，以及它是否与原问题不同。"""
+
+    rewritten: bool
+    query: str
+
+
+class _Draft(BaseModel):
+    """模型这一步的输出：只有改写后的句子。
+
+    `rewritten` 不在这里 —— 改没改由代码比较原句得出，不交给模型自评。
+    """
+
+    query: str = Field(
+        min_length=1,
+        max_length=RESULT_CHARS,
+        description="脱离对话也能独立检索的一句话，只补指代与省略信息、不扩写",
+    )
+
+
+def fallback(query: str) -> RewriteResult:
+    """退回原问题：检索用用户原话，并记为未改写。"""
+    return RewriteResult(rewritten=False, query=query)
+
 
 def recent_dialogue(messages, limit=HISTORY_MESSAGES) -> str:
-    """把本轮之前最近的几条用户与助手消息拼成对话文本，供改写消解指代。
+    """把本轮之前最近几条用户与助手的消息拼成对话文本。
 
-    必须排除本轮：本轮的用户消息就是待改写的那句，把它当成历史会让「没有历史就
-    原样返回」的短路失效，白白多调一次模型。
-    只取人写的那两种消息：带工具调用的助手消息正文为空，工具消息是检索到的原文，
-    两者拼进去都只是白占预算。
+    本轮不计入：本轮的用户消息就是待改写的那句。工具调用与工具结果也不计入。
     """
     items = list(messages or [])
     # 最后一个用户消息及其之后都属于本轮，不计入历史。
@@ -59,23 +92,33 @@ def recent_dialogue(messages, limit=HISTORY_MESSAGES) -> str:
     return "\n".join(lines)
 
 
-async def rewrite(model, query, history, timeout=TIMEOUT_SECONDS) -> str:
-    """改写查询；没有历史或任何一步失败都返回原问题。
+async def rewrite(model, query, history, timeout=TIMEOUT_SECONDS) -> RewriteResult:
+    """改写查询；没有历史或任何一步失败都返回原问题，并记为未改写。
 
-    model 传本轮 Agent 用过的那个实例，不另建连接。
+    model 用本轮 Agent 的实例，不另建连接。
     """
     if not history:
-        return query
+        return fallback(query)
     # 用替换而不是格式化：用户问题里的花括号不该被当成占位符。
     prompt = INSTRUCTION.replace("{history}", history).replace("{query}", query)
+    # 关掉流式：这次调用不属于本轮回答，一旦被上游的流式处理器升格成流式，
+    # 它的分片会混进回答正文。
+    quiet = model.model_copy(update={"disable_streaming": True})
+    structured = quiet.with_structured_output(_Draft)
+    original = query.strip()
     try:
-        # 关掉流式：这次调用不属于本轮回答，一旦被上游的流式处理器升格成流式，
-        # 它的分片会混进回答正文。
-        quiet = model.model_copy(update={"disable_streaming": True})
+        # 重试与首次尝试共用同一份超时预算：不能因为重试把整轮时间拖穿。
         async with asyncio.timeout(timeout):
-            response = await quiet.ainvoke(prompt)
+            for _ in range(ATTEMPTS):
+                try:
+                    draft = await structured.ainvoke(prompt)
+                except Exception:
+                    continue
+                if draft is None:
+                    continue
+                text = draft.query.strip()
+                if text:
+                    return RewriteResult(query=text, rewritten=text != original)
     except Exception:
-        return query
-    text = str(getattr(response, "text", "")).strip().strip("\"'“”").strip()
-    # 空回答、或改写成一段解释，都不如原问题可靠。
-    return text if 0 < len(text) <= RESULT_CHARS else query
+        pass
+    return fallback(query)

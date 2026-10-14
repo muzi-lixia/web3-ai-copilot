@@ -41,15 +41,15 @@ async def search_docs(query: str, runtime: ToolRuntime[RunContext]):
     with span("tool.completed", tool="search_docs"):
         context = runtime.context
         # 先改写：多轮追问里的「它」「这个」要靠最近几轮对话才能补全指代。
-        asked = await context.rewrite(query, recent_dialogue((runtime.state or {}).get("messages")))
+        rewritten = await context.rewrite(query, recent_dialogue((runtime.state or {}).get("messages")))
         data = await context.client.request(
             "POST",
             "/knowledge/search",
             context.token,
-            json={"query": asked, "limit": SEARCH_LIMIT},
+            json={"query": rewritten.query, "limit": SEARCH_LIMIT},
         )
         # 编号在拼上下文之前分配，卡片与模型看到的 [1][2] 因此是同一套。
-        hits = label_hits(rerank(data["hits"], asked))
+        hits = label_hits(rerank(data["hits"], rewritten.query))
         make_result(
             context,
             "knowledge",

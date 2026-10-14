@@ -18,7 +18,7 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.context import RunContext
 from app.agent.middleware import ContextBudget, LiveDataFilter
-from app.agent.models import chat_model, select_settings
+from app.agent.models import chat_models, select_settings, without_thinking
 from app.agent.rag import rewrite as rewrite_query
 from app.agent.tools import TOOLS
 from app.core.exceptions import AppError, NotFoundError, RateLimitError
@@ -35,8 +35,10 @@ PROMPT = """你是只读 Web3 助手，回答本人资产、公开行情与平�
    - 「我有多少钱」「我有多少资产」问的是本人持仓，按整体持仓查询。
    - 「BERA 多少钱」这类没提「我的」才按公开行情理解。
    - BERA 与 WBERA 是不同币种，不混用。
-4. 工具选择：先判断问题问的是本人持仓、公开行情还是知识库文档，再阅读工具描述并按适用场景
-   选择工具，不选错工具。
+4. 工具选择：先判断题目的答案是数值还是一段说明，再选工具：
+   - 数值：「我有多少 X」「我的资产」「我的持仓」用余额工具；「X 多少钱」用行情工具。
+   - 一段说明：问规则、周期、时间表、上限、怎么操作、有什么限制都属于这一类 —— 只要答案
+     不是数值、要的是文档里写的依据，就用 search_docs，不要用余额或行情工具顶替。
 5. 正文用自然语言说明本次结果：查到什么、金额多少、数据截止时间。所有金额、数量、时间
    必须逐字引用工具返回值，不四舍五入、不换算货币、不自行计算；工具没返回的数字不要补。
    用知识库片段作答时，在相应句子后标出片段编号（如 [1]、[1][2]），并说明出自哪份文档；
@@ -221,9 +223,12 @@ class ChatService:
                     else:
                         # 整个 Agent 执行（含多轮工具调用）共享这一个超时；超时统一走 TimeoutError。
                         async with asyncio.timeout(self.settings.copilot_timeout_seconds):
-                            async with chat_model(settings) as model:
-                                # 检索改写与 Agent 共用本轮模型实例，不另建连接。
-                                context.rewrite = partial(rewrite_query, model)
+                            async with chat_models(settings) as (model, rewriter, rewrite_conf):
+                                # 改写默认与 Agent 共用本轮模型实例；配置了独立提供方时用它自己的。
+                                # 改写不需要思考链，单独关掉换回往返时间。
+                                context.rewrite = partial(
+                                    rewrite_query, without_thinking(rewriter, rewrite_conf)
+                                )
                                 agent = create_agent(
                                     model,
                                     tools=TOOLS,
