@@ -193,6 +193,9 @@ class RoutingCase:
       其实答不了」的工具。
     - `expect_no_tools`
       首轮不该调用任何工具；与 `expect_tools` 互斥，写在一起无从判定。
+    - `max_calls`
+      首轮调用条数的上限，缺省表示不限制。用来量**过度调用**：一个问题一次就够时
+      写 1，多调一个「既不在期望、也不在禁区」的工具同样算错 —— 只写禁区卡不住它。
     - `expected_fail`
       标的是**已知缺口**：期望合理、当前模型确实选不对，且原因写在 note 里。
       它不把整轮判成失败；等它真能选对了，报告会提醒移除这个标记。
@@ -207,6 +210,7 @@ class RoutingCase:
     expect_tools: tuple[str, ...]
     forbid_tools: tuple[str, ...]
     expect_no_tools: bool = False
+    max_calls: int | None = None
     expected_fail: bool = False
     note: str = ""
 
@@ -220,6 +224,7 @@ def load_routing_cases(path: Path | None = None) -> list[RoutingCase]:
     - `name` 不能为空、也不能重复 —— 报告与基线都按名字定位，重名会互相覆盖；
     - `query` 不能为空，且三条期望至少要写一条；
     - `expect_no_tools` 不能与 `expect_tools` 同时写：一个要求不调、一个要求必调；
+    - `max_calls` 写了就要 ≥ 1（要「一个都不调」就写 `expect_no_tools`）；
     - `history` 里的角色只能是 user / assistant。
 
     工具名对不对不在这里查：那需要工具注册表，本模块只读用例文件。
@@ -239,8 +244,12 @@ def load_routing_cases(path: Path | None = None) -> list[RoutingCase]:
         expect_tools = tuple(str(text) for text in item.get("expect_tools") or ())
         forbid_tools = tuple(str(text) for text in item.get("forbid_tools") or ())
         expect_no_tools = bool(item.get("expect_no_tools", False))
+        # max_calls 缺省 None = 不限条数；写了就要求首轮调用条数不超过它。
+        max_calls = item.get("max_calls")
+        if max_calls is not None and int(max_calls) < 1:
+            raise ValueError(f"用例 {name} 的 max_calls 必须至少为 1：{max_calls!r}")
         # 只写问题、不写任何期望的用例无法判定，直接报错而不是当成必然失败。
-        if not query or not (expect_tools or forbid_tools or expect_no_tools):
+        if not query or not (expect_tools or forbid_tools or expect_no_tools or max_calls):
             raise ValueError(f"用例 {name} 缺少问题或期望")
         if expect_no_tools and expect_tools:
             raise ValueError(f"用例 {name} 同时要求「必调」与「不调」，无法判定")
@@ -252,6 +261,7 @@ def load_routing_cases(path: Path | None = None) -> list[RoutingCase]:
                 expect_tools=expect_tools,
                 forbid_tools=forbid_tools,
                 expect_no_tools=expect_no_tools,
+                max_calls=int(max_calls) if max_calls is not None else None,
                 expected_fail=bool(item.get("expected_fail", False)),
                 note=str(item.get("note") or ""),
             )

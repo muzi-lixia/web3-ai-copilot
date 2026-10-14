@@ -8,12 +8,17 @@
 - `blocked` 期望的语料根本不在库里，跳过判定 —— 否则缺数据会被误读成召回退化。
 """
 
+import math
+
 from app.modules.knowledge.service import KnowledgeService
 from evals.cases import RetrievalCase, load_retrieval_cases
 from evals.report import Report
 
 # 三种判定结果。用字符串常量而不是布尔值，是为了让 blocked 与 fail 可区分。
 OK, FAIL, BLOCKED = "ok", "fail", "blocked"
+
+# 报告里报的分档档位；超过判定范围的档位会量到用例根本没取回来的名次，所以不报。
+RECALL_STEPS = (1, 3, 5)
 
 
 def _matches(case: RetrievalCase, hit: dict) -> bool:
@@ -44,6 +49,31 @@ def _brief(hits: list[dict]) -> str:
         f"{hit['heading'] or '（无标题）'}"
         for index, hit in enumerate(hits, start=1)
     )
+
+
+def _recall_at(evaluated: list[dict], k: int) -> float:
+    """前 k 名内命中的条数占可判定条数的比例，判据与通过率完全一样。
+
+    分母是可判定条数（不含语料缺失的），所以 k 取 5 时这个数就等于通过率，
+    报出来只是让它按档位列清楚。
+    """
+    if not evaluated:
+        return 0.0
+    return sum(1 for item in evaluated if item["rank"] and item["rank"] <= k) / len(evaluated)
+
+
+def _ndcg_at(evaluated: list[dict], k: int) -> float:
+    """前 k 名内的归一化折损累计增益；每条用例只有一个相关片段，理想情况取第 1 名。
+
+    单相关时理想折损为 1，于是每条的增益就是 1/log2(名次+1)：第 1 名得 1.0、
+    第 2 名得 0.63、第 3 名得 0.50 —— 比 MRR 的 1/名次衰减慢，
+    用来把「排在前列」和「排在最前」分成两个水平。
+    """
+    if not evaluated:
+        return 0.0
+    return sum(
+        1 / math.log2(item["rank"] + 1) for item in evaluated if item["rank"] and item["rank"] <= k
+    ) / len(evaluated)
 
 
 async def _evaluate(cases: list[RetrievalCase], service: KnowledgeService, corpus: set[str]):
@@ -141,6 +171,13 @@ async def run(service: KnowledgeService) -> Report:
     passed = [item for item in evaluated if item["status"] == OK]
     # 4. 计算 MRR（平均倒数排名）只有 passed 的才计入分子，分母是全部 evaluate
     mrr = sum(1 / item["rank"] for item in passed) / len(evaluated) if evaluated else 0.0
+    # 5. 分档召回与名次折损：档位跟着用例声明的 top_k 走，超出它就会量到没取回来的名次
+    top_k = max(case.top_k for case in cases)
+    metrics = {"MRR": mrr}
+    metrics.update(
+        {f"Recall@{step}": _recall_at(evaluated, step) for step in RECALL_STEPS if step <= top_k}
+    )
+    metrics[f"nDCG@{top_k}"] = _ndcg_at(evaluated, top_k)
 
     return Report(
         key="retrieval",
@@ -157,7 +194,7 @@ async def run(service: KnowledgeService) -> Report:
         # 跳过的条数 = 全部结果减去可判定的那部分。
         blocked=len(outcomes) - len(evaluated),
         # 评估指标
-        metrics={"MRR": mrr},
+        metrics=metrics,
         # 明细文字交给本层自己拼，报告模块只负责按行打印。
         problems=_problems(outcomes),
         # 名次字典

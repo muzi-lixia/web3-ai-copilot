@@ -30,10 +30,10 @@
     }
   },
   "rewrite": {
-    "passed": 4,
+    "passed": 5,
     "evaluated": 8,
     "metrics": {
-      "改写率": 0.25
+      "改写率": 0.5
     },
     "ranks": {
       "rewrite-pronoun-assistant": 1,
@@ -42,7 +42,7 @@
       "rewrite-no-history": 1,
       "rewrite-standalone-with-history": 1,
       "rewrite-topic-carry": null,
-      "rewrite-long-history": null,
+      "rewrite-long-history": 1,
       "rewrite-alias-carry": null
     }
   },

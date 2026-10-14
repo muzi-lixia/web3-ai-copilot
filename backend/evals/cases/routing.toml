@@ -8,6 +8,10 @@
 #
 # expect_no_tools 与 expect_tools 互斥：一个要求不调、一个要求必调，写在一起无从判定。
 #
+# max_calls 卡的是另一件事 —— 过度调用。只写 forbid_tools 只能拦住点名的几个工具，
+# 多调一个「既不在期望、也不在禁区」的工具照样算过，写上限才拦得住。
+# 一个工具一次就能答完的问题写 1：多调的那次要么白花一次取数，要么就是选错了方向。
+#
 # 工具名必须是注册表里的名字（app/agent/tools/__init__.py），写错会在跑之前报错，
 # 不表现成一条用例未通过。工具职责写在各自的 description 里，这里的注释只讲
 # 「这条用例为什么在这里」。
@@ -21,6 +25,7 @@
 #   expect_tools    首轮必须调用其中至少一个（可写多条）
 #   forbid_tools    首轮不允许调用的工具（可写多条）
 #   expect_no_tools 首轮不该调用任何工具，缺省 false
+#   max_calls       首轮调用条数的上限，缺省不限制
 #   expected_fail   是否属于已知缺口，缺省 false
 #   note            备注，只在「已知缺口」与未通过段落里展示
 
@@ -35,6 +40,7 @@ history = [
 query = "那它的解锁周期是多久"
 expect_tools = ["search_docs"]
 forbid_tools = ["get_my_token_balance", "get_my_balance_overview", "get_token_price"]
+max_calls = 1
 note = "承接上一轮的资产话题，问的却是文档里的解锁安排"
 
 # 概念性问题：两个名字的区别写在文档里，没有可查的数值。
@@ -43,6 +49,7 @@ name = "route-knowledge-concept"
 query = "sWBERA 和 WBERA 有什么区别"
 expect_tools = ["search_docs"]
 forbid_tools = ["get_my_token_balance", "get_my_balance_overview", "get_token_price"]
+max_calls = 1
 note = "概念差异；余额工具的 description 里满是 BERA 与 WBERA 的规则，最容易被拉过去"
 
 # 参数含义：答案是一段说明，不是数值。
@@ -51,6 +58,7 @@ name = "route-knowledge-parameter"
 query = "Reward Vault 的 rewardsDuration 决定什么"
 expect_tools = ["search_docs"]
 forbid_tools = ["get_my_token_balance", "get_my_balance_overview", "get_token_price"]
+max_calls = 1
 note = "参数含义，文档里才有依据"
 
 # 操作步骤：问的是「怎么做」，不是「我有什么」。
@@ -63,6 +71,7 @@ history = [
 query = "想取出来要怎么做"
 expect_tools = ["search_docs"]
 forbid_tools = ["get_my_token_balance", "get_my_balance_overview"]
+max_calls = 1
 note = "操作指南类；紧接资产话题之后问步骤"
 
 # 规则上限：同样是文档里写好的安排。
@@ -71,6 +80,7 @@ name = "route-knowledge-limit"
 query = "激励市场的白名单最多能加几个代币"
 expect_tools = ["search_docs"]
 forbid_tools = ["get_my_balance_overview", "get_token_price"]
+max_calls = 1
 note = "规则上限，答案在文档里"
 
 # 未点名币种的整体持仓：该走概览，不是单币余额、也不是行情。
@@ -79,6 +89,7 @@ name = "route-balance-overview"
 query = "我一共持有多少资产"
 expect_tools = ["get_my_balance_overview"]
 forbid_tools = ["get_my_token_balance", "get_token_price", "search_docs"]
+max_calls = 1
 note = "整体持仓概览"
 
 # 点名币种的余额：单币查询，不是概览。
@@ -87,6 +98,7 @@ name = "route-balance-token"
 query = "我有多少 HONEY"
 expect_tools = ["get_my_token_balance"]
 forbid_tools = ["get_my_balance_overview", "get_token_price", "search_docs"]
+max_calls = 1
 note = "点名一个币种"
 
 # 与第一条镜像：上一轮是知识话题，这一轮问的是自己有多少 —— 该切到余额，
@@ -100,6 +112,7 @@ history = [
 query = "那我的 WBERA 余额还有多少"
 expect_tools = ["get_my_token_balance"]
 forbid_tools = ["get_my_balance_overview", "search_docs"]
+max_calls = 1
 note = "话题从知识切回本人持仓"
 
 # 公开行情：问价格，不是问自己有多少。
@@ -108,6 +121,7 @@ name = "route-price-plain"
 query = "BERA 现在多少钱"
 expect_tools = ["get_token_price"]
 forbid_tools = ["get_my_token_balance", "get_my_balance_overview", "search_docs"]
+max_calls = 1
 note = "公开行情；没提「我的」"
 
 # 上一轮在讲奖励规则，这一轮问价：该切行情，不要继续检索文档。
@@ -120,6 +134,7 @@ history = [
 query = "那 BERA 现在什么价"
 expect_tools = ["get_token_price"]
 forbid_tools = ["get_my_balance_overview", "search_docs"]
+max_calls = 1
 note = "话题从知识切到公开行情"
 
 # 平台配置类问题：问支持范围，不是持仓也不是单币价。
@@ -128,6 +143,7 @@ name = "route-chain-list"
 query = "平台支持哪些链和代币"
 expect_tools = ["get_chain_info"]
 forbid_tools = ["get_my_balance_overview", "search_docs"]
+max_calls = 1
 note = "公开配置查询"
 
 # 问候不该触发取数：没有任何要查的东西。

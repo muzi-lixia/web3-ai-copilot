@@ -7,9 +7,12 @@
 「线上那个模型选得对不对」，所以层内不固定提供方，headline 里报出这次实际跑的模型。
 会话里按用户选择切换模型的场景不在这里覆盖，评估用的始终是部署默认的那一个。
 
-每条用例有两种结果：
-- `ok`   断言满足；
-- `fail` 跑完了但断言不满足，是否算「已知缺口」由用例上的标记决定。
+每条用例的结果落在四种之一：
+- `ok`          首轮的选择符合期望；
+- `over_call`   多调了：命中禁区、问候却调了工具、或调用条数超过 `max_calls`；
+- `under_call`  该调没调：要求调用的工具一个都没命中，且首轮没有调任何工具；
+- `wrong_tool`  调了工具，但不是期望的那个。
+后三种是否算「已知缺口」由用例上的标记决定。
 """
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -21,8 +24,12 @@ from app.core.config import get_settings
 from evals.cases import RoutingCase, load_routing_cases
 from evals.report import Report
 
-# 两种判定结果。用字符串常量而不是布尔值，是为了与另外两层共用同一套报告口径。
-OK, FAIL = "ok", "fail"
+# 判定结果。用字符串常量而不是布尔值，是为了把三种错法分开成数 ——
+# 混成一个「未通过」看不出该往哪个方向收。
+OK, OVER, UNDER, WRONG = "ok", "over_call", "under_call", "wrong_tool"
+
+# 三种错法的显示名，只用在未通过的明细里。
+LABELS = {OVER: "过度调用", UNDER: "调用不足", WRONG: "工具选错"}
 
 # 注册表里的工具名；用例里写了别的名字会在跑之前报错，不表现成一条用例未通过。
 TOOL_NAMES = {tool.name for tool in TOOLS}
@@ -43,21 +50,27 @@ def _messages(case: RoutingCase) -> list[BaseMessage]:
     return messages
 
 
-def _matches(case: RoutingCase, calls: list[str]) -> bool:
-    """判定一条用例：看首轮实际调用的工具名有没有越过期望与禁区。
+def _classify(case: RoutingCase, calls: list[str]) -> str:
+    """判定一条用例，返回具体的错法而不是「过没过」。
 
-    三条期望都在这里生效，任何一条不满足即未通过：
-    - `expect_no_tools` 时只要调了工具就算错；
-    - `expect_tools` 要求至少命中一个；
-    - `forbid_tools` 命中任意一个就算错。
+    判断顺序是有意的：
+    - 禁区先判：既没调期望的、又调了禁区的，记「过度调用」更贴切 ——
+      它错在调了根本不该调的那个工具，记成「工具选错」会盖住这一点；
+    - 问候类要求一个都不调，调了就是过度；
+    - 条数超过 `max_calls` 同样是过度：卡的是「多调了一个既不在期望、
+      也不在禁区里的工具」，这种只写禁区拦不住；
+    - 期望的工具一个都没命中时再看有没有调别的：没调任何工具是「调用不足」，
+      调了别的则是「工具选错」。
     """
-    if case.expect_no_tools and calls:
-        return False
-    if case.expect_tools and not set(calls) & set(case.expect_tools):
-        return False
     if case.forbid_tools and set(calls) & set(case.forbid_tools):
-        return False
-    return True
+        return OVER
+    if case.expect_no_tools and calls:
+        return OVER
+    if case.max_calls is not None and len(calls) > case.max_calls:
+        return OVER
+    if case.expect_tools and not set(calls) & set(case.expect_tools):
+        return UNDER if not calls else WRONG
+    return OK
 
 
 def check_names(cases: list[RoutingCase]) -> None:
@@ -81,7 +94,7 @@ async def _evaluate(cases: list[RoutingCase], model) -> list[dict]:
         reply = await model.ainvoke(_messages(case))
         calls = [call["name"] for call in getattr(reply, "tool_calls", None) or []]
         outcomes.append(
-            {"case": case, "status": OK if _matches(case, calls) else FAIL, "calls": calls}
+            {"case": case, "status": _classify(case, calls), "calls": calls}
         )
     return outcomes
 
@@ -106,17 +119,18 @@ def _expected(case: RoutingCase) -> str:
 def _problems(outcomes: list[dict]) -> list[str]:
     """把未通过、已知缺口与已修复的缺口各排一段。
 
-    未通过的要给出实际调用的工具：判断是选错了类别，还是压根没调，看这一行就够了。
+    未通过的要给出错在哪一类，以及实际调用了什么：前者决定往哪个方向收，
+    后者用来判断是选错了类别，还是压根没调。
     """
-    failed = [item for item in outcomes if item["status"] == FAIL and not item["case"].expected_fail]
-    gaps = [item for item in outcomes if item["status"] == FAIL and item["case"].expected_fail]
+    failed = [item for item in outcomes if item["status"] != OK and not item["case"].expected_fail]
+    gaps = [item for item in outcomes if item["status"] != OK and item["case"].expected_fail]
     fixed = [item for item in outcomes if item["status"] == OK and item["case"].expected_fail]
     lines: list[str] = []
     if failed:
         lines.append(f"\n  未通过 {len(failed)} 条：")
         for item in failed:
             case = item["case"]
-            lines.append(f"    ✗ {case.name}  「{case.query}」")
+            lines.append(f"    ✗ {case.name}  「{case.query}」  {LABELS[item['status']]}")
             lines.append(f"        实际 {_called(item['calls'])}")
             lines.append(f"        期望 {_expected(case)}")
     if gaps:
@@ -149,16 +163,30 @@ async def run(service) -> Report:
     settings = select_settings(get_settings(), None)
     async with chat_model(settings) as model:
         outcomes = await _evaluate(cases, model.bind_tools(TOOLS))
+    total = len(outcomes)
     passed = [item for item in outcomes if item["status"] == OK]
+    # 三种错法各数一遍，把「多调了」与「没调够」分开报：混在一个通过率里，
+    # 看不出提示词该往哪个方向收。
+    over = [item for item in outcomes if item["status"] == OVER]
+    under = [item for item in outcomes if item["status"] == UNDER]
+    wrong = [item for item in outcomes if item["status"] == WRONG]
     return Report(
         key="routing",
         title="路由层 L1",
-        headline=f"模型 {settings.model_provider}:{settings.model_name}，用例 {len(cases)} 条",
+        headline=f"模型 {settings.model_provider}:{settings.model_name}，用例 {total} 条",
         passed=len(passed),
-        evaluated=len(outcomes),
+        evaluated=total,
         # 只有「选错且未标记」的算失败；标记过的已知缺口单独计数。
-        failed=len([item for item in outcomes if item["status"] == FAIL and not item["case"].expected_fail]),
-        known_gaps=len([item for item in outcomes if item["status"] == FAIL and item["case"].expected_fail]),
+        failed=len([item for item in outcomes if item["status"] != OK and not item["case"].expected_fail]),
+        known_gaps=len([item for item in outcomes if item["status"] != OK and item["case"].expected_fail]),
+        # 四个比率之和为 1：正确率掉下来时，能直接看出是哪种错法占的。
+        # 必须放比率而不是计数 —— 报告按 {:.2f} 打印，计数会显示成「2.00」。
+        metrics={
+            "正确率": len(passed) / total,
+            "过度调用率": len(over) / total,
+            "调用不足率": len(under) / total,
+            "工具选错率": len(wrong) / total,
+        },
         # 明细文字交给本层自己拼，报告模块只负责按行打印。
         problems=_problems(outcomes),
         ranks={item["case"].name: (1 if item["status"] == OK else None) for item in outcomes},
