@@ -19,9 +19,9 @@ import { createAppKit } from '@reown/appkit/react'
 const projectId = import.meta.env.VITE_REOWN_PROJECT_ID
 
 if (!projectId) {
-  throw new Error(
-    '缺少 VITE_REOWN_PROJECT_ID：把 frontend/.env.example 复制为 frontend/.env 并填入 projectId（在 https://cloud.reown.com 免费创建）。',
-  )
+    throw new Error(
+        '缺少 VITE_REOWN_PROJECT_ID：把 frontend/.env.example 复制为 frontend/.env 并填入 projectId（在 https://cloud.reown.com 免费创建）。',
+    )
 }
 
 /** 登录签名支持已接入的 EVM 网络；资产查询网络由基础服务目录提供。 */
@@ -30,22 +30,22 @@ const networks = [berachain, mainnet, bsc, polygon, arbitrum, base] as [AppKitNe
 const wagmiAdapter = new WagmiAdapter({ projectId, networks })
 
 createAppKit({
-  adapters: [wagmiAdapter],
-  networks,
-  projectId,
-  metadata: {
-    name: 'Web3 AI Copilot',
-    description: '基于 AI Agent 的链上资产分析与知识助手',
-    url: window.location.origin,
-    icons: [],
-  },
-  features: {
-    analytics: false,
-    // 只做钱包登录：留着邮箱/社交登录会让"我是谁"变成一堆与链上无关的身份，
-    // 而本项目全链路都建立在「地址即身份」上。
-    email: false,
-    socials: false,
-  },
+    adapters: [wagmiAdapter],
+    networks,
+    projectId,
+    metadata: {
+        name: 'Web3 AI Copilot',
+        description: '基于 AI Agent 的链上资产分析与知识助手',
+        url: window.location.origin,
+        icons: [],
+    },
+    features: {
+        analytics: false,
+        // 只做钱包登录：留着邮箱/社交登录会让"我是谁"变成一堆与链上无关的身份，
+        // 而本项目全链路都建立在「地址即身份」上。
+        email: false,
+        socials: false,
+    },
 })
 
 export const wagmiConfig = wagmiAdapter.wagmiConfig

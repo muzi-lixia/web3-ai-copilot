@@ -23,7 +23,7 @@ class FoundationClient:
         """尽力取出基础服务的错误 body；不是 JSON 就返回空字典。
 
         基础服务的 msg 与数字业务码是设计上就公开的文案（连 500 都被兜底成
-        「服务内部错误」，见 core.exception_handlers），可以原样带给调用方；
+        「服务内部错误」，见 core.http.errors），可以原样带给调用方；
         这里只防它返回非 JSON body。
         """
         try:

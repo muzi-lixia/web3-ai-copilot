@@ -20,7 +20,7 @@ class RetrievalCase:
 
     期望写成「出处 + 内容里必须出现的原话」，不锁片段顺序与相似度数值：
     换模型或调召回只要还能把这一段取回来，就该通过。expect_doc 与 expect_any
-    至少要有一个，只写问题不写期望就无从判定。
+    至少要有一个；无答案用例则使用 expect_empty，不能与命中期望混用。
 
     字段：
     - `name`        用例名，报告与基线比对都按它定位，必须唯一。
@@ -44,6 +44,8 @@ class RetrievalCase:
     top_k: int
     expected_fail: bool = False
     note: str = ""
+    expect_empty: bool = False
+    requires_docs: tuple[str, ...] = ()
 
 
 def load_retrieval_cases(path: Path | None = None) -> list[RetrievalCase]:
@@ -53,7 +55,7 @@ def load_retrieval_cases(path: Path | None = None) -> list[RetrievalCase]:
     校验规则（任一不满足都抛 ValueError，让问题在跑之前就暴露）：
     - 文件里至少要有一条用例；
     - `name` 不能为空、也不能重复 —— 报告与基线都按名字定位，重名会互相覆盖；
-    - `query` 不能为空，且 `expect_doc` 与 `expect_any` 至少要有一个。
+    - `query` 不能为空，且声明命中期望或 expect_empty，二者不能混用。
     """
     source = path or CASES_DIR / "retrieval.toml"
     # tomllib 是标准库，用例文件不需要任何额外依赖；读文件固定用 UTF-8。
@@ -70,7 +72,12 @@ def load_retrieval_cases(path: Path | None = None) -> list[RetrievalCase]:
         # expect_any 允许写多条原话；缺省成空元组，表示只校验出处。
         expect_any = tuple(str(text) for text in item.get("expect_any") or ())
         # 只写问题、不写任何期望的用例无法判定，直接报错而不是当成必然失败。
-        if not query or not (item.get("expect_doc") or expect_any):
+        expect_empty = item.get("expect_empty", False)
+        if not isinstance(expect_empty, bool):
+            raise ValueError(f"用例 {name} 的 expect_empty 必须是布尔值")
+        if expect_empty and (item.get("expect_doc") or expect_any):
+            raise ValueError(f"用例 {name} 的无答案期望不能同时声明命中片段")
+        if not query or not (item.get("expect_doc") or expect_any or expect_empty):
             raise ValueError(f"用例 {name} 缺少问题或期望")
         cases.append(
             RetrievalCase(
@@ -80,10 +87,14 @@ def load_retrieval_cases(path: Path | None = None) -> list[RetrievalCase]:
                 expect_any=expect_any,
                 # 未写明 top_k 时取 5，与线上检索的取值保持一致。
                 top_k=int(item.get("top_k", 5)),
+                expect_empty=expect_empty,
+                requires_docs=tuple(item.get("requires_docs") or ()),
                 expected_fail=bool(item.get("expected_fail", False)),
                 note=str(item.get("note") or ""),
             )
         )
+    if any(case.top_k < 1 or case.top_k > 20 for case in cases):
+        raise ValueError("检索用例 top_k 必须在 1 到 20 之间")
     if not cases:
         raise ValueError(f"{source} 里没有任何用例")
     return cases

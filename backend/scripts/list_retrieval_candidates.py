@@ -15,7 +15,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from app.core.config import get_settings
+from app.foundation.config import get_foundation_settings
 from app.infrastructure.database.session import Database
 from app.modules.knowledge.service import KnowledgeService
 from evals.cases import RetrievalCase, load_retrieval_cases
@@ -44,6 +44,8 @@ def _heading(hit: dict) -> str:
 
 def _expectation(case: RetrievalCase) -> str:
     """把用例现有的判据写成一行，勾选时用来对照。"""
+    if case.expect_empty:
+        return "无相关片段"
     doc = case.expect_doc or "任一文档"
     wanted = "、".join(f'"{text}"' for text in case.expect_any) or "（只校验出处）"
     return f"出处 `{doc}`，正文含 {wanted}"
@@ -80,8 +82,8 @@ def _render(collected: list[tuple[RetrievalCase, list[dict]]], limit: int) -> st
 
 async def _run(limit: int, out: Path) -> int:
     """逐条检索取候选，渲染后写出文件；环境不通时直接报错退出。"""
-    settings = get_settings()
-    database = Database(settings.foundation_database_url or settings.database_url)
+    settings = get_foundation_settings()
+    database = Database(settings.foundation_database_url)
     try:
         service = KnowledgeService(database, settings)
         collected: list[tuple[RetrievalCase, list[dict]]] = []

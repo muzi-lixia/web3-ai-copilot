@@ -28,6 +28,7 @@ async def initialize():
             ("app_rw", "CHAT_RW_PASSWORD", "copilot_dev_rw"),
             ("app_foundation", "FOUNDATION_DB_PASSWORD", "copilot_dev_foundation"),
             ("app_agent", "AGENT_DB_PASSWORD", "copilot_dev_agent"),
+            ("app_knowledge", "KNOWLEDGE_DB_PASSWORD", "copilot_dev_knowledge"),
         ):
             if not await connection.fetchval("SELECT 1 FROM pg_roles WHERE rolname=$1", role):
                 # 角色名来自固定清单；口令需转义 SQL 字符串引号，且不写入日志。
@@ -35,7 +36,9 @@ async def initialize():
                 await connection.execute(f"CREATE ROLE {role} LOGIN NOBYPASSRLS PASSWORD '{password}'")
         # 只有迁移角色获得 schema 创建权，运行角色只获得使用权和后续表的读写权。
         await connection.execute("GRANT USAGE, CREATE ON SCHEMA public TO app_ddl")
-        await connection.execute("GRANT USAGE ON SCHEMA public TO app_rw, app_foundation, app_agent")
+        await connection.execute(
+            "GRANT USAGE ON SCHEMA public TO app_rw, app_foundation, app_agent, app_knowledge"
+        )
         await connection.execute("""ALTER DEFAULT PRIVILEGES FOR ROLE app_ddl IN SCHEMA public
             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_rw""")
         # 安装扩展需要数据库级权限，运行账号没有，只能在管理员连接里建。
@@ -58,7 +61,9 @@ if __name__ == "__main__":
     from langgraph.checkpoint.postgres import PostgresSaver
     from sqlalchemy.engine import make_url
 
-    from app.core.config import settings
+    from app.infrastructure.database.config import MigrationSettings
+
+    settings = MigrationSettings()
 
     dsn = (
         make_url(settings.database_migration_url)
@@ -90,6 +95,16 @@ if __name__ == "__main__":
                 "checkpoint_writes, checkpoint_migrations TO app_agent"
             )
             await connection.execute("GRANT EXECUTE ON FUNCTION agent_recover_turns() TO app_agent")
+            await connection.execute("GRANT EXECUTE ON FUNCTION agent_runtime_status() TO app_agent")
+            await connection.execute("GRANT EXECUTE ON FUNCTION agent_observability_status() TO app_agent")
+            await connection.execute("GRANT SELECT,INSERT,DELETE ON agent_checkpoint_deletions TO app_agent")
+            await connection.execute("GRANT SELECT ON documents TO app_knowledge")
+            await connection.execute("""GRANT UPDATE(status,chunk_count,error,stage,error_code,updated_at,
+                worker_id,claim_token,lease_until,embedding_version,attempt_count,available_at)
+                ON documents TO app_knowledge""")
+            await connection.execute("GRANT SELECT,INSERT,DELETE ON chunks TO app_knowledge")
+            await connection.execute("""GRANT SELECT,INSERT,UPDATE,DELETE
+                ON knowledge_file_deletions,knowledge_workers TO app_knowledge""")
         finally:
             await connection.close()
 

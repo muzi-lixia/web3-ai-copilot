@@ -10,26 +10,31 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from sqlalchemy import text
 
+from app.agent.config import AgentSettings
 from app.agent.repository import ConversationRepository
-from app.core.config import Settings
 from app.core.exceptions import ConflictError, NonceInvalidError, NotFoundError, UnauthorizedError
-from app.core.resources import BusinessResources
-from app.foundation.auth import AuthService
+from app.foundation.config import FoundationSettings
 from app.foundation.main import create_app
-from app.foundation.results import ResultService
 from app.infrastructure.database.session import Database
+from app.infrastructure.resources import BusinessResources
+from app.modules.asset.results import ResultService
+from app.modules.identity.service import AuthService
 
 pytestmark = pytest.mark.skipif(os.getenv("RUN_DATABASE_TESTS") != "1", reason="需要显式启用本地 PostgreSQL")
 
 
 @pytest.fixture
-async def services():
-    settings = Settings(_env_file=None)
-    db = Database(settings.database_url)
+async def services(tmp_path):
+    settings = FoundationSettings(_env_file=None)
+    db = Database(settings.foundation_database_url)
+    agent_settings = AgentSettings(_env_file=None, agent_outbox_dir=str(tmp_path / "outbox"))
+    agent_db = Database(agent_settings.agent_database_url)
     resources = BusinessResources(settings)
     value = SimpleNamespace(
         settings=settings,
         database=db,
+        agent_database=agent_db,
+        agent_settings=agent_settings,
         resources=resources,
         auth=AuthService(db, settings),
         results=ResultService(db, resources),
@@ -37,6 +42,7 @@ async def services():
     try:
         yield value
     finally:
+        await agent_db.close()
         await db.close()
 
 
@@ -70,7 +76,7 @@ async def test_restart_replay_rotation_and_logout(services):
 
 async def test_stable_identity_and_rls_conversation_ownership(services):
     account, _, _, credentials = await login(services)
-    repo = ConversationRepository(services.database, services.settings)
+    repo = ConversationRepository(services.agent_database, services.agent_settings)
     user = credentials["user_id"]
     c = await repo.conversation(user)
     tid, created = await repo.create_turn(user, c["id"], str(uuid4()), "安全查询BERA")
@@ -103,16 +109,16 @@ async def test_result_ownership_and_cross_conversation_refs(services):
         "queriedAt": "2026-10-10T10:00:00Z",
     }
     meta = await services.results.save(user, payload)
-    assert "total_value" not in meta
-    assert (await services.results.get(user, meta["result_id"]))["total_value"] == "0"
+    assert meta["total_value"] == "0"
+    assert (await services.results.get(user, meta["id"]))["total_value"] == "0"
     with pytest.raises(NotFoundError):
-        await services.results.get(str(uuid4()), meta["result_id"])
-    repo = ConversationRepository(services.database, services.settings)
+        await services.results.get(str(uuid4()), meta["id"])
+    repo = ConversationRepository(services.agent_database, services.agent_settings)
     c = await repo.conversation(user)
-    await repo.add_ref(user, c["id"], meta["result_id"])
-    await repo.check_refs(user, c["id"], [meta["result_id"]])
+    await repo.add_ref(user, c["id"], meta["id"])
+    await repo.check_refs(user, c["id"], [meta["id"]])
     with pytest.raises(NotFoundError):
-        await repo.check_refs(user, str(uuid4()), [meta["result_id"]])
+        await repo.check_refs(user, str(uuid4()), [meta["id"]])
 
 
 async def test_http_auth_and_trace_propagation(services):
@@ -141,10 +147,10 @@ async def test_full_agent_http_tool_checkpoint_and_history(services, monkeypatch
 
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    from app.agent.main import postgres_dsn
     from app.agent.privacy import normalize_query
     from app.agent.service import ChatService
     from app.infrastructure.database import runtime_lock
+    from app.infrastructure.database.dsn import postgres_dsn
     from app.infrastructure.database.runtime_lock import RuntimeLock
     from app.infrastructure.foundation_client import FoundationClient
     from tests.factories import make_wallet
@@ -160,16 +166,20 @@ async def test_full_agent_http_tool_checkpoint_and_history(services, monkeypatch
     async def controlled_model(settings):
         yield QueryModel()
 
-    monkeypatch.setattr("app.agent.service.chat_model", controlled_model)
-    foundation = FoundationClient(services.settings, transport=httpx.ASGITransport(app=create_app(services)))
+    monkeypatch.setattr("app.agent.llm.chat_model", controlled_model)
+    foundation = FoundationClient(
+        services.agent_settings, transport=httpx.ASGITransport(app=create_app(services))
+    )
     foundation.default_chain_id = 80094
-    repository = ConversationRepository(services.database, services.settings)
+    repository = ConversationRepository(services.agent_database, services.agent_settings)
     # 此测试验证执行/Checkpoint，不验证启动收尾。使用随机测试租约，
     # 不抢正在运行的真实服务锁，也不调用全局恢复函数影响真实用户轮次。
     monkeypatch.setattr(runtime_lock, "LOCK_KEY", 1 + uuid4().int % (2**31 - 2))
-    async with AsyncPostgresSaver.from_conn_string(postgres_dsn(services.settings.database_url)) as saver:
+    dsn = postgres_dsn(services.agent_settings.agent_database_url)
+    async with AsyncPostgresSaver.from_conn_string(dsn) as saver:
         runtime = ChatService(
-            repository, foundation, services.settings, RuntimeLock(services.database.engine), saver
+            repository, foundation, services.agent_settings,
+            RuntimeLock(services.agent_database.engine), saver
         )
         await runtime.lease.acquire()
         try:
@@ -184,15 +194,16 @@ async def test_full_agent_http_tool_checkpoint_and_history(services, monkeypatch
             await asyncio.wait_for(task, 10)
             snapshot = await runtime.snapshot(credentials["user_id"], response["turn_id"])
             assert snapshot["status"] == "completed", snapshot["error"]
-            assert snapshot["message"]["result_refs"]
+            assert snapshot["message"]["results"]
             stored = await saver.aget_tuple({"configurable": {"thread_id": snapshot["session_id"]}})
             serialized = json.dumps(stored.checkpoint, default=str)
-            assert "123456.789" not in serialized
+            assert "123456.789" in serialized
+            assert "我有123456.789个BERA" not in serialized
             assert credentials["token"] not in serialized and credentials["address"] not in serialized
             history = await repository.history(credentials["user_id"])
             assert len(history["items"]) == 2
             assert history["items"][0]["content"] == "查询我的BERA余额，我有123456.789个BERA"
-            await runtime.clear(credentials["user_id"])
+            await runtime.clear(credentials["user_id"], credentials["token"])
             assert await saver.aget_tuple({"configurable": {"thread_id": snapshot["session_id"]}}) is None
         finally:
             await runtime.stop()
@@ -208,7 +219,7 @@ async def test_separate_service_database_privileges(services):
         ("app_agent", "copilot_dev_agent", "service_users"),
         ("app_foundation", "copilot_dev_foundation", "agent_conversations"),
     ):
-        url = make_url(services.settings.database_url).set(username=role, password=password)
+        url = make_url(services.settings.foundation_database_url).set(username=role, password=password)
         db = Database(url.render_as_string(hide_password=False))
         try:
             with pytest.raises(DBAPIError):
@@ -223,7 +234,7 @@ async def test_original_display_persistence_idempotency_and_ownership(services):
 
     _, _, _, credentials = await login(services)
     user = credentials["user_id"]
-    repository = ConversationRepository(services.database, services.settings)
+    repository = ConversationRepository(services.agent_database, services.agent_settings)
     conversation = await repository.conversation(user)
     original = "  查询我的BERA余额，我有98765.4321个BERA\n"
     safe = normalize_query(original).text
@@ -238,7 +249,7 @@ async def test_original_display_persistence_idempotency_and_ownership(services):
         await repository.find_client_turn(user, conversation["id"], client_id, safe, "查询我的BERA余额")
     with pytest.raises(ConflictError):
         await repository.create_turn(user, conversation["id"], client_id, safe, "查询我的BERA余额")
-    reloaded = ConversationRepository(services.database, services.settings)
+    reloaded = ConversationRepository(services.agent_database, services.agent_settings)
     assert (await reloaded.history(user))["items"][0]["content"] == original
     _, _, _, another = await login(services)
     assert not (await reloaded.history(another["user_id"]))["items"]

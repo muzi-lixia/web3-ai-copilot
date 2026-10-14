@@ -11,8 +11,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agent.privacy import SafeInput, normalize_query
-from app.api.responses import success
-from app.core.exceptions import AppError, UnauthorizedError
+from app.core.exceptions import AppError, ForbiddenError, UnauthorizedError
+from app.core.http.responses import success
 
 router = APIRouter(prefix="/chat", tags=["Agent 对话"])
 bearer = HTTPBearer(auto_error=False)
@@ -50,6 +50,8 @@ async def current(
     if not credentials:
         raise UnauthorizedError("缺少登录凭证")
     identity = await request.app.state.services.client.identity(credentials.credentials)
+    if identity.get("scope") != "user":
+        raise ForbiddenError("对话接口仅允许用户凭证访问")
     return {**identity, "token": credentials.credentials}
 
 
@@ -204,13 +206,13 @@ class ModelSelection(BaseModel):
 @router.put("/session/model", summary="切换本人对话模型")
 async def model(body: ModelSelection, request: Request, user: Current):
     """普通用户仅改变自己的对话模型，不能修改全局配置或提供凭据。"""
-    from app.agent.models import select_settings
+    from app.agent.llm import select_settings
     from app.core.exceptions import ForbiddenError
 
     settings = request.app.state.services.settings
     chosen = select_settings(settings, body.provider)
     if chosen.model_provider != "ollama" and not body.accept_external:
-        raise ForbiddenError("使用在线模型需要明确确认安全对话元数据会外发")
+        raise ForbiddenError("使用在线模型需要确认对话、持仓数量、估值及知识库引用片段会发送给模型提供方")
     repository = request.app.state.services.repository
     conversation = await repository.conversation(user["user_id"])
     await repository.set_model(user["user_id"], conversation["id"], chosen.model_provider)
@@ -228,7 +230,7 @@ async def selected_model(request: Request, user: Current):
     """只公开当前用户的模型选择与可用目录，不创建会话，也不返回部署凭据。"""
     from sqlalchemy import text
 
-    from app.agent.models import select_settings
+    from app.agent.llm import resolve_session_provider, select_settings
 
     services = request.app.state.services
     async with services.repository.db.transaction(user["user_id"]) as session:
@@ -236,6 +238,7 @@ async def selected_model(request: Request, user: Current):
             text("SELECT model_provider FROM agent_conversations WHERE user_id=:u AND expires_at>now()"),
             {"u": user["user_id"]},
         )
+    provider = resolve_session_provider(services.settings, provider)
     available = []
     selected = None
     for name in ("ollama", "deepseek", "qwen"):
@@ -251,7 +254,7 @@ async def selected_model(request: Request, user: Current):
         except AppError:
             entry = {"provider": name, "model": None, "enabled": False, "external": name != "ollama"}
         available.append(entry)
-        if name == (provider or services.settings.model_provider):
+        if name == provider:
             selected = entry
     return success(
         {**selected, "available": available, "context_ttl_hours": services.settings.conversation_ttl_hours}

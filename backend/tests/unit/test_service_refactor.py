@@ -16,7 +16,7 @@ from app.agent.context import RunContext
 from app.agent.privacy import normalize_query
 from app.agent.tools import TOOLS
 from app.core.logging import JsonFormatter, TraceMiddleware, span, span_id, trace_id
-from app.foundation.results import ResultService, summary
+from app.modules.asset.results import ResultService, summary
 
 
 @pytest.mark.parametrize(
@@ -128,7 +128,12 @@ async def test_aggregate_uses_latest_asset_once_and_preserves_failure():
 def test_metadata_projection_carries_amounts_without_addresses():
     """数值必须进模型（结果描述由模型生成），地址与代币合约仍不进。"""
     payload = make_result("123456.789")
+    payload["token"] = "secret-credential"
+    payload["internal_notes"] = "private-internal-field"
     projected = summary(payload)
+    assert "secret-credential" not in json.dumps(projected)
+    assert "private-internal-field" not in json.dumps(projected)
+    assert set(projected["holdings"][0]) == {"chain", "symbol", "amount", "value_usd"}
     assert projected["total_value"] == "123456.789"
     assert projected["holdings"][0]["value_usd"] == "123456.789"
     safe = json.dumps(projected)

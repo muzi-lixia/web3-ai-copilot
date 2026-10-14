@@ -9,6 +9,8 @@ import time
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
+from app.agent.middleware import LiveDataFilter
+from app.agent.privacy import normalize_query
 from app.core.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -92,7 +94,7 @@ def recent_dialogue(messages, limit=HISTORY_MESSAGES) -> str:
 
     本轮不计入：本轮的用户消息就是待改写的那句。工具调用与工具结果也不计入。
     """
-    items = list(messages or [])
+    items = LiveDataFilter()._filtered(list(messages or []))
     # 最后一个用户消息及其之后都属于本轮，不计入历史。
     cut = len(items)
     for index in range(len(items) - 1, -1, -1):
@@ -103,7 +105,7 @@ def recent_dialogue(messages, limit=HISTORY_MESSAGES) -> str:
     for message in items[:cut][-limit:]:
         if not isinstance(message, BaseMessage) or message.type not in ("human", "ai"):
             continue
-        text = str(message.text).strip()
+        text = normalize_query(str(message.text)).text.strip()
         if text:
             lines.append(f"{'用户' if message.type == 'human' else '助手'}：{text[:HISTORY_CHARS]}")
     return "\n".join(lines)

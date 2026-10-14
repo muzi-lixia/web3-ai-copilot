@@ -10,22 +10,32 @@ import ToolCalls from './ToolCalls'
 import type { CopilotResult, ToolMeta } from '../types/api'
 
 export default function TurnResult({ say, results, toolMeta }: {
-  say?: ReactNode; results: CopilotResult[]; toolMeta?: ToolMeta
+    say?: ReactNode
+    results: CopilotResult[]
+    toolMeta?: ToolMeta
 }) {
-  // 认领不到的数据单独列出：缺工具轨迹的历史消息，或轨迹里没有的产出（如合并后被删的）。
-  const claimed = new Set((toolMeta?.calls ?? []).flatMap(call => call.result_ids ?? []))
-  const orphans = results.filter(result => !claimed.has(result.result_id))
-  return <div className="blk">
-    <div className="blk-b">{say}</div>
-    <details className="fold">
-      <summary>数据来源与工具调用
-        <span className="rt">{toolMeta ? `${toolMeta.calls.length} 次调用 · ${toolMeta.total_duration_ms}ms` : `${results.length} 条数据`}</span>
-        <span className="arw" />
-      </summary>
-      <div className="blk-b">
-        {!!toolMeta?.calls.length && <ToolCalls meta={toolMeta} results={results} />}
-        {orphans.map(result => <SourceFold key={result.result_id} result={result} />)}
-      </div>
-    </details>
-  </div>
+    // 认领不到的数据单独列出：缺工具轨迹的历史消息，或轨迹里没有的产出（如合并后被删的）。
+    const claimed = new Set((toolMeta?.calls ?? []).flatMap(call => call.result_ids ?? []))
+    const orphans = results.filter(result => !claimed.has(result.result_id))
+
+    return (
+        <div className="blk">
+            <div className="blk-b">{say}</div>
+            <details className="fold">
+                <summary>
+                    数据来源与工具调用
+                    <span className="rt">
+                        {toolMeta
+                            ? `${toolMeta.calls.length} 次调用 · ${toolMeta.total_duration_ms}ms`
+                            : `${results.length} 条数据`}
+                    </span>
+                    <span className="arw" />
+                </summary>
+                <div className="blk-b">
+                    {!!toolMeta?.calls.length && <ToolCalls meta={toolMeta} results={results} />}
+                    {orphans.map(result => <SourceFold key={result.result_id} result={result} />)}
+                </div>
+            </details>
+        </div>
+    )
 }

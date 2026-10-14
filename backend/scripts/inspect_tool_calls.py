@@ -5,10 +5,10 @@
 要看的是首轮路由层测不到的那部分：同一轮里把同一个工具调两次（看到结果不满意
 再试一次）、一轮调了五六次。那些是多轮行为，只有在真实轮次的轨迹里才看得到。
 
-轮次带行级安全，不设身份一行都读不到，所以地址是必填的（写成库内小写形态）。
+轮次带行级安全，不设身份一行都读不到，所以用户 ID 是必填的（users.id，而非钱包地址）。
 
 用法（在 backend 目录下）：
-    .venv/bin/python -m scripts.inspect_tool_calls <用户地址> [最近轮数，默认 50]
+    .venv/bin/python -m scripts.inspect_tool_calls <用户 ID> [最近轮数，默认 50]
 """
 
 import asyncio
@@ -18,7 +18,7 @@ from collections import Counter
 
 from sqlalchemy import text
 
-from app.core.config import get_settings
+from app.agent.config import get_agent_settings
 from app.infrastructure.database.session import Database
 
 # 不传轮数时看最近这么多轮。
@@ -40,12 +40,12 @@ def _calls(row: dict) -> list[dict]:
     return row["tool_trace"] or []
 
 
-async def fetch(address: str, limit: int) -> list[dict]:
-    """以该地址的身份取最近 limit 轮的轨迹；走应用的同一套事务，不提升权限。"""
-    settings = get_settings()
-    database = Database(settings.agent_database_url or settings.database_url)
+async def fetch(user_id: str, limit: int) -> list[dict]:
+    """以该用户 ID 的身份取最近 limit 轮的轨迹；走应用的同一套事务，不提升权限。"""
+    settings = get_agent_settings()
+    database = Database(settings.agent_database_url)
     try:
-        async with database.transaction(address) as session:
+        async with database.transaction(user_id) as session:
             rows = (
                 (
                     await session.execute(
@@ -114,12 +114,12 @@ def report(rows: list[dict]) -> None:
         print(f"   {_when(row['created_at'])}  {call.get('tool')}  {call.get('status')}")
 
 
-async def main(address: str, limit: int) -> None:
+async def main(user_id: str, limit: int) -> None:
     """取数据并打印；这里不计算任何指标，只把形态摆出来。"""
-    report(await fetch(address, limit))
+    report(await fetch(user_id, limit))
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        raise SystemExit("用法：python -m scripts.inspect_tool_calls <用户地址> [最近轮数]")
+        raise SystemExit("用法：python -m scripts.inspect_tool_calls <用户 ID> [最近轮数]")
     asyncio.run(main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_LIMIT))

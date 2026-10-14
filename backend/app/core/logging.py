@@ -8,15 +8,27 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 trace_id = ContextVar("trace_id", default="")
 span_id = ContextVar("span_id", default="")
 parent_span_id = ContextVar("parent_span_id", default="")
+operation_fields = ContextVar("operation_fields", default=None)
 service_name = ContextVar("service", default="backend")
 FIELDS = frozenset(
     {
         "turn_id",
+        "run_id",
+        "attempt_id",
+        "attempt_count",
+        "worker_id",
+        "checkpoint_pending",
+        "outbox_pending",
+        "commit_ms",
+        "pool_wait_ms",
+        "operation",
+        "sqlstate",
         "tool",
         "model",
         "provider",
@@ -36,6 +48,19 @@ FIELDS = frozenset(
         "stage",
         "kind",
         "rewritten",
+        "queue_ms",
+        "execution_ms",
+        "first_token_ms",
+        "total_ms",
+        "active_turns",
+        "pending_count",
+        "pending",
+        "processing",
+        "failed",
+        "oldest_pending_seconds",
+        "workers",
+        "cleanup_pending",
+        "recovered_count",
     }
 )
 
@@ -47,7 +72,7 @@ class JsonFormatter(logging.Formatter):
         """把日志记录渲染成单行 JSON，只保留白名单字段。
 
         事件名不合法时归为 application.log；字符串字段超过长度或含地址/令牌/URL 一律丢弃，
-        异常只记类型名，不落栈和原文 —— 保证日志里不会意外带出敏感数据。
+        异常仅记录类型和安全代码位置，不落原文 —— 保证日志里不会意外带出敏感数据。
         """
         event = str(record.msg)
         if not re.fullmatch(r"[a-z][a-z0-9_.]{0,80}", event):
@@ -65,7 +90,7 @@ class JsonFormatter(logging.Formatter):
         # 只接收白名单里的标量字段；字符串一旦超长、或含地址/令牌/URL 就整条丢弃，
         # 宁可少记也不冒把敏感数据写进日志的风险。
         for key in FIELDS:
-            value = getattr(record, key, None)
+            value = getattr(record, key, (operation_fields.get() or {}).get(key))
             if isinstance(value, (str, int, float, bool)):
                 if isinstance(value, str) and (
                     len(value) > 160 or "0x" in value or "Bearer " in value or "://" in value
@@ -73,8 +98,15 @@ class JsonFormatter(logging.Formatter):
                     continue
                 body[key] = value
         if record.exc_info and record.exc_info[0]:
-            # 异常只记类型名，不写栈和原文。
+            # 仅保留代码位置：不含异常原文、源码行、绝对路径或局部变量。
             body["exception_type"] = record.exc_info[0].__name__
+            frames, tb = [], record.exc_info[2]
+            while tb:
+                code = tb.tb_frame.f_code
+                frames.append({"file": Path(code.co_filename).name, "function": code.co_name,
+                               "line": tb.tb_lineno})
+                tb = tb.tb_next
+            body["stack"] = frames[-12:]
         return json.dumps(body, ensure_ascii=False)
 
 
@@ -114,25 +146,48 @@ def span(event, **fields):
     """子阶段沿用 trace_id；退出时记录耗时和状态，异常只记录安全错误码。"""
     parent = parent_span_id.set(span_id.get())
     current = span_id.set(uuid4().hex[:16])
-    started, status, error = time.monotonic(), "success", None
+    started = time.monotonic()
+    outcome = {"status": "success", "error_code": None}
     try:
-        yield
+        yield outcome
     except BaseException as exc:
-        status = "cancelled" if type(exc).__name__ == "CancelledError" else "failed"
-        error = getattr(exc, "code", type(exc).__name__)
+        outcome["status"] = "cancelled" if type(exc).__name__ == "CancelledError" else "failed"
+        outcome["error_code"] = getattr(exc, "code", type(exc).__name__)
         raise
     finally:
         get_logger(__name__).info(
             event,
             extra={
                 **fields,
-                "status": status,
-                "error_code": error,
+                **outcome,
                 "duration_ms": round((time.monotonic() - started) * 1000, 2),
             },
         )
         span_id.reset(current)
         parent_span_id.reset(parent)
+
+
+@contextmanager
+def log_context(**fields):
+    """让异步子任务和工作线程继承受控关联字段，退出时恢复上下文。"""
+    token = operation_fields.set({**(operation_fields.get() or {}), **fields})
+    try:
+        yield
+    finally:
+        operation_fields.reset(token)
+
+
+@contextmanager
+def restore_trace(context):
+    """外层 ASGI 500 处理器运行时恢复已退出的请求关联上下文。"""
+    pairs = ((trace_id, "trace_id"), (span_id, "span_id"),
+             (parent_span_id, "parent_span_id"), (service_name, "service"))
+    tokens = [(variable, variable.set(context.get(key, ""))) for variable, key in pairs]
+    try:
+        yield
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
 
 
 class TraceMiddleware:
@@ -160,6 +215,10 @@ class TraceMiddleware:
             (parent_span_id, parent_span_id.set(parent if re.fullmatch(r"[a-f0-9]{16}", parent) else "")),
             (service_name, service_name.set(self.service)),
         ]
+        scope.setdefault("state", {})["trace_context"] = {
+            "trace_id": trace_id.get(), "span_id": span_id.get(),
+            "parent_span_id": parent_span_id.get(), "service": self.service,
+        }
         started, status = time.monotonic(), 500
 
         async def traced_send(message):

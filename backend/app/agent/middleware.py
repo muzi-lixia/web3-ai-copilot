@@ -6,6 +6,7 @@ import time
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, RemoveMessage
 
+from app.agent.knowledge_policy import needs_retrieval
 from app.core.exceptions import ContextTooLargeError
 from app.core.logging import span
 
@@ -28,6 +29,7 @@ LIVE_TOOLS = frozenset(
         "get_token_price",
         "query_assets",
         "aggregate_results",
+        "search_docs",
     }
 )
 
@@ -70,6 +72,10 @@ class LiveDataFilter(AgentMiddleware):
             if calls:
                 # 用户原话保留 —— 其中的数字是用户自己给的比较阈值，不是工具报价。
                 out.extend((turn[0], AIMessage(content=self._note(calls))))
+            elif turn[0].type == "human" and needs_retrieval(turn[0].text):
+                out.extend((turn[0], AIMessage(content=(
+                    "（上一轮没有可验证的检索记录，旧回答不能作为知识库依据；本轮必须重新检索。）"
+                ))))
             else:
                 out.extend(turn)
         out.extend(turns[-1])
@@ -101,7 +107,7 @@ class LiveDataFilter(AgentMiddleware):
         """摘要只用工具名与调用参数构建，不引用任何工具返回值。"""
         named = "、".join(f"{call['name']}({_args_brief(call['args'])})" for call in calls)
         return (
-            f"（上一轮调用过实时数据工具：{named}。"
+            f"（上一轮调用过数据或检索工具：{named}。"
             "返回值已失效，不得当作当前数据引用，需要时重新调用。）"
         )
 
@@ -169,7 +175,7 @@ class ContextBudget(AgentMiddleware):
         """业务异常转为安全工具反馈；身份错误不能伪装成普通工具参数错误。"""
         from langchain_core.messages import ToolMessage
 
-        from app.core.exceptions import AppError, UnauthorizedError
+        from app.core.exceptions import AppError, KnowledgeRetrievalError, UnauthorizedError
 
         if request.tool is None:
             return await handler(request)
@@ -177,6 +183,11 @@ class ContextBudget(AgentMiddleware):
         # 工具调用轨迹：所有工具调用都经过这里，所以只在这一处记录就不会漏。
         # 记在参数校验之前 —— 参数不合规被拒的调用同样要留痕，那正是要观测的部分。
         call = {"tool": request.tool_call["name"], "args": request.tool_call["args"]}
+        call["origin"] = "model"
+        for message in reversed((request.runtime.state or {}).get("messages", [])):
+            if message.type == "ai" and any(c["id"] == request.tool_call["id"] for c in message.tool_calls):
+                call["origin"] = message.additional_kwargs.get("tool_origin", "model")
+                break
         context.tool_calls.append(call)
         # 只放行 schema 里声明的业务参数：模型可能借框架字段（如 runtime）注入身份。
         # 这里回一条工具错误让模型自我纠正，而不是抛异常打断整轮。
@@ -197,6 +208,8 @@ class ContextBudget(AgentMiddleware):
         try:
             result = await handler(request)
         except UnauthorizedError:
+            call.update(status="failed", error_code="unauthorized",
+                        duration_ms=round((time.monotonic() - started) * 1000))
             # 身份失效必须向上抛：伪装成普通工具失败会让对话继续跑在一个无效会话上。
             raise
         except AppError as exc:
@@ -204,6 +217,9 @@ class ContextBudget(AgentMiddleware):
             call["error_code"] = exc.code
             call["upstream_code"] = getattr(exc, "upstream_code", None)
             call["duration_ms"] = round((time.monotonic() - started) * 1000)
+            if request.tool_call["name"] == "search_docs":
+                # 系统故障必须结束轮次，不能让模型解释成“没有相关资料”。
+                raise
             # 把上游真实原因交给模型，而不是一句通用文案 —— 否则模型无从判断缺什么，
             # 只能把问题推回给用户。400/404/422 是「参数不对」，模型可自纠（如换链重查）；
             # 429 与 5xx 属于「稍后重试」，不要引导模型去改参数。
@@ -223,7 +239,14 @@ class ContextBudget(AgentMiddleware):
                 tool_call_id=request.tool_call["id"],
                 status="error",
             )
-        call["status"] = "ok"
+        except BaseException as exc:
+            call.update(status="cancelled" if type(exc).__name__ == "CancelledError" else "failed",
+                        error_code="tool_interrupted", duration_ms=round((time.monotonic() - started) * 1000))
+            if isinstance(exc, Exception) and request.tool_call["name"] == "search_docs":
+                call["error_code"] = "knowledge_retrieval_failed"
+                raise KnowledgeRetrievalError("知识库检索暂不可用，请稍后重试") from exc
+            raise
+        call["status"] = "failed" if getattr(result, "status", None) == "error" else "ok"
         call["duration_ms"] = round((time.monotonic() - started) * 1000)
         # 这次调用新产出的结果 id：前端据此把数据挂到对应工具条目下。
         # 只记新增 —— 合并类工具会把被并入的结果从列表里删掉，消失的不属于这次产出。

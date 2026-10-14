@@ -11,7 +11,9 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
-from app.core.config import settings
+from app.infrastructure.database.config import MigrationSettings
+
+settings = MigrationSettings()
 
 
 def migrate(connection):

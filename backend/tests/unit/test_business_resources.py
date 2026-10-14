@@ -8,18 +8,18 @@ from unittest.mock import AsyncMock
 
 import httpx
 
-from app.core.config import Settings
-from app.core.resources import BusinessResources
+from app.foundation.config import FoundationSettings
+from app.foundation.main import create_app
 from app.infrastructure.blockchain.chains import BERACHAIN
 from app.infrastructure.blockchain.client import _candidate_urls
-from app.main import create_app
+from app.infrastructure.resources import BusinessResources
 from app.modules.market import service as market
 from app.modules.market.schemas import TokenMarket, TokenMarketList
 
 
 def test_rpc_overrides_and_cache_belong_to_resources():
-    a = BusinessResources(Settings(_env_file=None, rpc_overrides="80094=https://rpc-a.example"))
-    b = BusinessResources(Settings(_env_file=None, rpc_overrides="80094=https://rpc-b.example"))
+    a = BusinessResources(FoundationSettings(_env_file=None, rpc_overrides="80094=https://rpc-a.example"))
+    b = BusinessResources(FoundationSettings(_env_file=None, rpc_overrides="80094=https://rpc-b.example"))
     a.good_rpc[80094] = "https://rpc-a.example"
     assert _candidate_urls(BERACHAIN, resources=a) == ["https://rpc-a.example"]
     assert _candidate_urls(BERACHAIN, resources=b) == ["https://rpc-b.example"]
@@ -27,7 +27,8 @@ def test_rpc_overrides_and_cache_belong_to_resources():
 
 
 async def test_market_cache_is_not_shared_between_applications(monkeypatch):
-    a, b = BusinessResources(Settings(_env_file=None)), BusinessResources(Settings(_env_file=None))
+    a = BusinessResources(FoundationSettings(_env_file=None))
+    b = BusinessResources(FoundationSettings(_env_file=None))
     quote = TokenMarket(
         symbol="BERA", price_usd=Decimal("1"), source="dexscreener", updated_at=datetime.now(UTC)
     )
@@ -42,13 +43,13 @@ async def test_market_cache_is_not_shared_between_applications(monkeypatch):
 async def test_business_http_uses_container_default_chain_and_resources(monkeypatch):
     instances = []
     for chain in (80094, 1):
-        settings = Settings(_env_file=None, default_chain_id=chain)
+        settings = FoundationSettings(_env_file=None, default_chain_id=chain)
         from app.infrastructure.database.session import Database
 
         instances.append(
             SimpleNamespace(
                 settings=settings,
-                database=Database(settings.database_url),
+                database=Database(settings.foundation_database_url),
                 resources=BusinessResources(settings),
             )
         )
@@ -80,3 +81,24 @@ async def test_business_http_uses_container_default_chain_and_resources(monkeypa
     finally:
         for services in instances:
             await services.database.close()
+
+
+async def test_asset_result_expiry_uses_foundation_configuration():
+    from contextlib import asynccontextmanager
+    from datetime import timedelta
+
+    from app.modules.asset.results import ResultService
+
+    session = SimpleNamespace(execute=AsyncMock())
+
+    @asynccontextmanager
+    async def transaction(user):
+        yield session
+
+    settings = FoundationSettings(_env_file=None, asset_result_ttl_hours=12)
+    service = ResultService(SimpleNamespace(transaction=transaction), BusinessResources(settings))
+    before = datetime.now(UTC)
+    saved = await service.save("u", {"total_value": "1"})
+    expires = session.execute.await_args.args[1]["e"]
+    assert before + timedelta(hours=12) <= expires <= datetime.now(UTC) + timedelta(hours=12)
+    assert saved["total_value"] == "1" and saved["id"]

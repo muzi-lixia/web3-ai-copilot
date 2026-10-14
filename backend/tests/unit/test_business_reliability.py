@@ -15,13 +15,13 @@ from web3.exceptions import ContractLogicError
 from app.common.schemas import DataIssue
 from app.common.singleflight import singleflight
 from app.common.units import to_human
-from app.core.config import settings
 from app.core.exceptions import UpstreamError
-from app.core.resources import default_resources
+from app.foundation.config import get_foundation_settings
 from app.infrastructure.blockchain import client as chain
 from app.infrastructure.blockchain import staking_vault
 from app.infrastructure.blockchain.chains import BERACHAIN
 from app.infrastructure.providers import market as market_source
+from app.infrastructure.resources import default_resources
 from app.modules.asset import service as asset_service
 from app.modules.asset.tokens import tokens_for
 from app.modules.asset.valuation import value_assets
@@ -32,6 +32,8 @@ from app.modules.staking import service as staking_service
 from app.modules.staking.constants import modules_for
 from app.modules.staking.service import StakedSlice
 from tests.factories import make_wallet as _wallet
+
+settings = get_foundation_settings()
 
 
 def quote(symbol="WBERA"):

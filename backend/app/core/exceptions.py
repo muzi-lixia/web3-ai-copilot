@@ -1,4 +1,4 @@
-"""跨层业务异常。HTTP 响应映射位于 core.exception_handlers。"""
+"""跨层业务异常。HTTP 响应映射位于 core.http.errors。"""
 
 
 class AppError(Exception):
@@ -104,3 +104,10 @@ class ContextTooLargeError(AppError):
 
     status_code = 422
     code = "model_context_too_large"
+
+
+class KnowledgeRetrievalError(AppError):
+    """检索基础设施失败，不允许降级成无答案或交给模型编造结论。"""
+
+    status_code = 502
+    code = "knowledge_retrieval_failed"

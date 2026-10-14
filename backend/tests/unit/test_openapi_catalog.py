@@ -2,13 +2,14 @@
 
 from types import SimpleNamespace
 
+from app.agent.config import AgentSettings
 from app.agent.main import create_app as agent_app
-from app.core.config import Settings
+from app.foundation.config import FoundationSettings
 from app.foundation.main import create_app as foundation_app
 
 
 def test_service_catalog_metadata():
-    settings = Settings(_env_file=None)
+    settings = FoundationSettings(_env_file=None)
     foundation = foundation_app(SimpleNamespace(settings=settings)).openapi()
     paths = foundation["paths"]
     assert paths["/api/v1/auth/refresh"]["post"]["x-auth-description"] == "Refresh Token（请求体）"
@@ -18,7 +19,7 @@ def test_service_catalog_metadata():
     assert {} in quotes["security"]
     assert "匿名可访问" in quotes["x-auth-description"]
     assert quotes["tags"] == ["行情"]
-    agent = agent_app(settings).openapi()
+    agent = agent_app(AgentSettings(_env_file=None)).openapi()
     model = agent["paths"]["/api/v1/chat/session/model"]
     assert model["get"]["summary"] == "读取模型配置"
     assert model["put"]["summary"] == "切换本人对话模型"

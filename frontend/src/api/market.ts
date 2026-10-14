@@ -10,13 +10,13 @@ import type { ApiResponse, TokenMarketList } from '../types/api'
  * （两份清单迟早会不一致，而且不一致时不报错，只是少几个币）。
  */
 export async function fetchMarketQuotes(
-  options: { chainId?: number; symbols?: string[] } = {},
+    options: { chainId?: number; symbols?: string[] } = {},
 ): Promise<TokenMarketList> {
-  const { data } = await http.get<ApiResponse<TokenMarketList>>('/markets/quotes', {
-    params: {
-      chain_id: options.chainId,
-      symbols: options.symbols?.length ? options.symbols.join(',') : undefined,
-    },
-  })
-  return data.data
+    const { data } = await http.get<ApiResponse<TokenMarketList>>('/markets/quotes', {
+        params: {
+            chain_id: options.chainId,
+            symbols: options.symbols?.length ? options.symbols.join(',') : undefined,
+        },
+    })
+    return data.data
 }

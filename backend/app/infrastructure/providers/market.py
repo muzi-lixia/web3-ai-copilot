@@ -9,8 +9,8 @@ from typing import Any
 import httpx
 
 from app.common.units import monetary_calculation
-from app.core.resources import BusinessResources, resolve_resources
 from app.infrastructure.blockchain.chains import ChainMeta
+from app.infrastructure.resources import BusinessResources, resolve_resources
 from app.modules.market.schemas import MarketSource
 
 

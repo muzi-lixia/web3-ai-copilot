@@ -21,8 +21,8 @@ from web3.exceptions import ContractLogicError
 
 from app.core.exceptions import InvalidAddressError, UpstreamError
 from app.core.logging import get_logger
-from app.core.resources import BusinessResources, resolve_resources
 from app.infrastructure.blockchain.chains import ChainMeta
+from app.infrastructure.resources import BusinessResources, resolve_resources
 from app.modules.asset.tokens import TokenMeta
 
 logger = get_logger(__name__)

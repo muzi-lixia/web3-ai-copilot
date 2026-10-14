@@ -14,22 +14,22 @@ import './index.css'
  * 看板查询由 TanStack Query 缓存；登录态用 zustand，对话页面维护订阅和临时展示状态。
  */
 const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      refetchOnWindowFocus: false,
-      staleTime: 30_000,
+    defaultOptions: {
+        queries: {
+            retry: 1,
+            refetchOnWindowFocus: false,
+            staleTime: 30_000,
+        },
     },
-  },
 })
 
 createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    {/* WagmiProvider 必须在 QueryClientProvider 外层：wagmi 内部复用同一个 QueryClient */}
-    <WagmiProvider config={wagmiConfig}>
-      <QueryClientProvider client={queryClient}>
-        <App />
-      </QueryClientProvider>
-    </WagmiProvider>
-  </StrictMode>,
+    <StrictMode>
+        {/* WagmiProvider 必须在 QueryClientProvider 外层：wagmi 内部复用同一个 QueryClient */}
+        <WagmiProvider config={wagmiConfig}>
+            <QueryClientProvider client={queryClient}>
+                <App />
+            </QueryClientProvider>
+        </WagmiProvider>
+    </StrictMode>,
 )

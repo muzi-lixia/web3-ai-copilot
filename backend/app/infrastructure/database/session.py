@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.infrastructure.database.observability import ObservedSession, instrument_engine
+
 
 class Database:
     """应用独占的异步数据库连接池与会话工厂。
@@ -24,7 +26,8 @@ class Database:
         self.engine = create_async_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=5)
         # 创建会话工厂，连接池为空时新建连接。expire_on_commit=False 允许提交后读已加载字段；
         # 不表示可以跨事务复用 ORM 会话。
-        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        instrument_engine(self.engine)
+        self.sessions = async_sessionmaker(self.engine, class_=ObservedSession, expire_on_commit=False)
 
     @asynccontextmanager
     async def transaction(self, user_id: str) -> AsyncIterator[AsyncSession]:
@@ -37,6 +40,40 @@ class Database:
                 )
                 # 正常离开 begin 自动提交，异常自动回滚；调用方不要在此处执行长模型推理。
                 yield session
+
+    async def validate_agent_schema(self) -> None:
+        """运行账号只检查自身契约，不读取迁移账号的 alembic_version 或执行 DDL。"""
+        async with self.sessions() as session:
+            ready = await session.scalar(text("""
+                SELECT to_regclass('agent_checkpoint_deletions') IS NOT NULL
+                  AND to_regprocedure('agent_runtime_status()') IS NOT NULL
+                  AND to_regprocedure('agent_observability_status()') IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM pg_attribute
+                      WHERE attrelid=to_regclass('agent_turns') AND attname='run_id' AND NOT attisdropped)
+                  AND EXISTS (SELECT 1 FROM pg_attribute
+                      WHERE attrelid=to_regclass('agent_turns') AND attname='timings' AND NOT attisdropped)
+            """))
+        if not ready:
+            raise RuntimeError(
+                "Agent 数据库结构未就绪，需要迁移至 0015_observability。"
+                "请在 backend 目录使用迁移账号执行 uv run alembic upgrade head，然后重启 Agent；"
+                "DATABASE_MIGRATION_URL 与 AGENT_DATABASE_URL 须指向同一数据库。"
+            )
+
+    async def validate_embedding_dimensions(self, dimensions: int) -> None:
+        """启动时核对向量列维度；模型配置不能代替数据库结构迁移。"""
+        async with self.sessions() as session:
+            column_dimensions = await session.scalar(text("""
+                SELECT a.atttypmod
+                FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+                WHERE a.attrelid = 'chunks'::regclass AND a.attname = 'embedding'
+                  AND NOT a.attisdropped AND t.typname = 'vector'
+            """))
+        if column_dimensions != dimensions:
+            raise RuntimeError(
+                f"chunks.embedding 向量维度为 {column_dimensions}，配置要求 {dimensions}；"
+                "请先完成向量列迁移和文档重建"
+            )
 
     async def close(self) -> None:
         """销毁连接池，归还所有空闲连接；调用方应先等待正在使用数据库的任务结束。"""

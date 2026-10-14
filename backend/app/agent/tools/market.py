@@ -3,11 +3,27 @@
 import json
 
 from langchain.tools import ToolRuntime, tool
+from pydantic import Field, model_validator
 
 from app.agent.context import RunContext
-from app.agent.tools.base import BalanceArguments, ChainArguments
+from app.agent.tools.base import ChainArguments, PricedArguments
 from app.agent.tools.envelope import make_result
 from app.core.logging import span
+
+
+class TokenPriceArguments(PricedArguments):
+    """指定单个币种的查询参数：在计价参数上追加一个必填符号。"""
+
+    symbol: str = Field(
+        min_length=1, max_length=64, description="精确币种符号，例如 BERA 或 WBERA；二者不可混用"
+    )
+
+    @model_validator(mode="after")
+    def contract_requires_chain(self):
+        """代币合约脱离网络无法解析，必须在参数阶段拒绝，而不是留给下游报错。"""
+        if self.symbol.startswith("0x") and self.chain_id is None:
+            raise ValueError("代币合约必须同时指定网络")
+        return self
 
 
 @tool(
@@ -28,7 +44,7 @@ async def get_chain_info(runtime: ToolRuntime[RunContext], chain_id: int | None 
 
 
 @tool(
-    args_schema=BalanceArguments,
+    args_schema=TokenPriceArguments,
     description="""查询代币公开市场行情价格，用于回答「X 多少钱」。该数据为市场价格，不是用户钱包持仓余额。
                 禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 query_assets。
                 每次调用实时拉取最新行情，无缓存，不可复用对话历史内旧行情数据。""",

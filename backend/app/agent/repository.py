@@ -49,6 +49,7 @@ class ConversationRepository:
                 )
                 if active:
                     raise ConflictError("会话仍在执行，请稍后重置")
+                retired = row["id"]
                 await s.execute(text("DELETE FROM agent_conversations WHERE user_id=:u"), dict(u=user))
                 row = None
             if row:
@@ -102,9 +103,9 @@ class ConversationRepository:
             # state 省略，取列默认值（排队态）；生成任务拿到模型额度后才推进到 running。
             await s.execute(
                 text("""INSERT INTO agent_turns
-                (id,conversation_id,user_id,client_id,query,display_text,trace_id)
-                VALUES(:id,:c,:u,:i,:q,:d,:t)"""),
-                dict(id=tid, c=cid, u=user, i=client_id, q=query, d=display_text, t=trace_id.get()),
+                (id,conversation_id,user_id,client_id,query,display_text,trace_id,run_id)
+                VALUES(:id,:c,:u,:i,:q,:d,:t,:run)"""),
+                dict(id=tid, c=cid, u=user, i=client_id, q=query, d=display_text, t=trace_id.get(), run=tid),
             )
             return tid, True
 
@@ -148,11 +149,14 @@ class ConversationRepository:
                 )
             )
 
-    async def update(self, user, tid, answer, state, results, *, error=None, usage=None, tool_trace=None):
+    async def update(
+        self, user, tid, answer, state, results, *, error=None, usage=None, tool_trace=None, timings=None
+    ):
         """写入一轮的展示状态；answer 是全量正文，不是增量。
 
         version 每次自增，订阅端据此判断快照是否变新 —— 所以这里必须整体覆盖，
         不能只写新增片段，否则断线重连会拼出互相矛盾的正文。
+        已有终态不可再次覆盖，重复补写和迟到的旧进程更新均幂等忽略。
         tool_trace 传 None 表示不改动该列：只有生成过程会更新轨迹，
         取消、补写终态等路径回写时应保留已记录的内容。
         """
@@ -162,8 +166,9 @@ class ConversationRepository:
             await s.execute(
                 text("""UPDATE agent_turns SET answer=:a,state=:s,
                 results=CAST(:r AS jsonb),error_code=:e,usage=CAST(:g AS jsonb),
-                tool_trace=coalesce(CAST(:c AS jsonb),tool_trace),version=version+1
-                WHERE id=:t AND user_id=:u"""),
+                tool_trace=coalesce(CAST(:c AS jsonb),tool_trace),
+                timings=coalesce(CAST(:timings AS jsonb),timings),version=version+1
+                WHERE id=:t AND user_id=:u AND state IN ('queued','running')"""),
                 dict(
                     a=answer,
                     s=state,
@@ -171,6 +176,7 @@ class ConversationRepository:
                     e=error,
                     g=json.dumps(usage or {}),
                     c=None if tool_trace is None else json.dumps(tool_trace),
+                    timings=None if timings is None else json.dumps(timings),
                     t=tid,
                     u=user,
                 ),
@@ -280,6 +286,7 @@ class ConversationRepository:
                     total_duration_ms=sum(int(c.get("duration_ms") or 0) for c in calls),
                     # 提问时写入的追踪串，前端复制它去日志里对这一次调用。
                     trace_id=row.get("trace_id"),
+                    run_id=row.get("run_id"),
                 ),
                 # 提问时刻，与同轮的用户消息共用；回答完成时刻另行记录。
                 created_at=row["created_at"].isoformat(),
@@ -287,6 +294,7 @@ class ConversationRepository:
             error=row["error_code"],
             # execution_phase 直接复用 DB state，目前只可能是 queued/running/completed/failed/cancelled。
             context_info={"execution_phase": state},
+            timings=row.get("timings") or {},
         )
 
     async def clear(self, user):
@@ -295,7 +303,7 @@ class ConversationRepository:
             await s.execute(text("DELETE FROM agent_conversations WHERE user_id=:u"), dict(u=user))
 
     async def model_provider(self, user, cid):
-        """读取该会话选择的模型提供方；为空表示沿用部署默认。"""
+        """读取该会话选择的模型提供方；为空表示使用本地模型，在线模型须显式选择。"""
         async with self.db.transaction(user) as s:
             return await s.scalar(
                 text("SELECT model_provider FROM agent_conversations WHERE id=:c AND user_id=:u"),
@@ -360,3 +368,17 @@ class ConversationRepository:
                     )
                 ).all()
             )
+
+
+    async def checkpoint_deletions(self):
+        """清理队列不包含消息或用户资料，不受会话级联删除影响。"""
+        async with self.db.sessions() as session:
+            return list(await session.scalars(text(
+                "SELECT thread_id FROM agent_checkpoint_deletions ORDER BY created_at LIMIT 100"
+            )))
+
+    async def finish_checkpoint_deletion(self, thread_id):
+        async with self.db.sessions.begin() as session:
+            await session.execute(text(
+                "DELETE FROM agent_checkpoint_deletions WHERE thread_id=:id"
+            ), {"id": thread_id})

@@ -1,16 +1,16 @@
 # Web3 AI Copilot
 
-当前工程采用同仓库的两个后端服务：基础服务提供独立的资产、行情、风险和质押 API；Agent 通过标准工具调用基础服务，负责自然语言查询与安全上下文。
+当前工程采用同仓库的两个 HTTP 服务和一个独立文档 worker：基础服务提供独立的资产、行情、风险和质押 API；Agent 通过标准工具调用基础服务，负责自然语言查询与安全上下文；worker 专门执行文档解析与入库。
 
 - 后端：FastAPI、PostgreSQL、LangChain / LangGraph、Ollama / DeepSeek / Qwen。
 - 前端：React、Ant Design、钱包签名登录、SSE、真实结果卡片。
 - 不使用 Redis；日志采用 JSON＋trace_id，不部署独立追踪平台。
 - 保留 Berachain 基础业务，并登记 Ethereum、BSC、Polygon、Arbitrum 和 Base。
-- 当前 Agent 只读，不包含交易、签名执行或 RAG。
+- 当前 Agent 只读，支持知识库 RAG，不包含交易或签名执行。
 
 ## 启动
 
-完整配置与两个服务的启动命令见 [后端运行说明](backend/README.md)。
+完整配置、两个 HTTP 服务与独立文档 worker 的启动命令见 [后端运行说明](backend/README.md)。
 
 ```bash
 docker compose up -d postgres
@@ -24,10 +24,13 @@ uv run python scripts/init_chat_db.py
 ```bash
 uv run uvicorn app.foundation.main:app --port 8000 --no-access-log
 uv run uvicorn app.agent.main:app --port 8001 --workers 1 --no-access-log
+
+# 独立终端：知识库文档处理
+uv run python -m app.workers.knowledge
 ```
 
 前端在 `frontend` 中执行 `npm ci`、`npm run dev`。默认模型需准备本地 `qwen2.5:7b`。
-已有 `.env` 保留原业务配置，按 `backend/.env.example` 补充新配置。生产不要使用开发密钥或口令。
+已有 `.env` 保留原业务配置，参考 `backend/.env.foundation.example`、`.env.agent.example`、`.env.worker.example` 和 `.env.migration.example` 配置对应运行单元。生产不要使用开发密钥或口令。
 
 ## 阅读入口
 

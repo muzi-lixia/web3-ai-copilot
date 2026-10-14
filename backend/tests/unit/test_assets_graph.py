@@ -5,7 +5,7 @@ import json
 import pytest
 from langgraph.constants import CONFIG_KEY_CHECKPOINTER
 
-from app.agent.assets import ASSETS_GRAPH
+from app.agent.asset_graph import ASSETS_GRAPH
 from app.agent.context import RunContext
 from app.core.exceptions import UpstreamError
 

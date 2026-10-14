@@ -11,6 +11,7 @@
 import math
 
 from app.modules.knowledge.service import KnowledgeService
+from app.modules.knowledge.version import embedding_version
 from evals.cases import RetrievalCase, load_retrieval_cases
 from evals.report import Report
 
@@ -87,13 +88,20 @@ async def _evaluate(cases: list[RetrievalCase], service: KnowledgeService, corpu
     outcomes: list[dict] = []
     for case in cases:
         # 期望的文档不在库里时，检索再准也不可能命中，判失败是误判。
-        if case.expect_doc and case.expect_doc not in corpus:
+        if (
+            (case.expect_doc and case.expect_doc not in corpus)
+            or any(doc not in corpus for doc in case.requires_docs)
+            or (case.expect_empty and not corpus)
+        ):
             outcomes.append({"case": case, "status": BLOCKED, "rank": None, "hits": []})
             continue
         # 执行检索并拿到检索返回的结果
         hits = (await service.search(case.query, case.top_k))["hits"]
         # enumerate 从 1 开始：名次是给人看的，第 1 名就是第 1 名。
         rank = next((index for index, hit in enumerate(hits, start=1) if _matches(case, hit)), None)
+        if case.expect_empty:
+            # 仅把判定编码为 1/None 供基线比较，不计入正样本排名指标。
+            rank = 1 if not hits else None
         status = OK if rank else FAIL
         outcomes.append({"case": case, "status": status, "rank": rank, "hits": hits})
     return outcomes
@@ -121,7 +129,11 @@ def _problems(outcomes: list[dict]) -> list[str]:
             # 只校验出处时显式写出来，避免被读成「这条用例没有任何期望」。
             wanted = "、".join(f'"{text}"' for text in case.expect_any) or "（只校验出处）"
             lines.append(f"    ✗ {case.name}  「{case.query}」")
-            lines.append(f"        期望 {case.expect_doc or '任一文档'} 命中 {wanted}")
+            lines.append(
+                "        期望无相关片段，实际却返回了片段"
+                if case.expect_empty
+                else f"        期望 {case.expect_doc or '任一文档'} 命中 {wanted}"
+            )
             lines.append(_brief(item["hits"]))
     if gaps:
         lines.append(f"\n  已知缺口 {len(gaps)} 条（不计入失败）：")
@@ -140,14 +152,14 @@ def _problems(outcomes: list[dict]) -> list[str]:
         lines.append(f"\n  语料缺失 {len(blocked)} 条（不计入通过率）：")
         for item in blocked:
             case = item["case"]
-            lines.append(f"    - {case.name}  期望 {case.expect_doc}，当前库里没有这份文档")
+            lines.append(f"    - {case.name}  所需语料未就绪或向量版本不兼容")
     return lines
 
 
 async def run(service: KnowledgeService) -> Report:
     """跑完检索层全部用例，返回可比较的结果与可读的失败说明。
 
-    语料集合由库里所有文档的 `filename` 与 `title` 一起拼成，
+    语料集合由已就绪且向量版本兼容的文档的 `filename` 与 `title` 一起拼成，
     用来判断一条用例是不是因为「文档不在库」而 blocked。
     headline 只报已就绪的文档数与片段数，说明这次评估是在多大的语料上做的。
     """
@@ -156,11 +168,13 @@ async def run(service: KnowledgeService) -> Report:
     # 所有文档的元数据列表
     documents = await service.listing()
     # 只有 ready 的文档才算语料；pending/failed 的既没有分片也不该进统计口径。
-    ready = [document for document in documents if document["status"] == "ready"]
-    # 语料是所有文档的 filename 与 title 的并集
-    corpus = {document["filename"] for document in documents} | {
-        document["title"] for document in documents
-    }
+    version = embedding_version(service.settings)
+    ready = [
+        document
+        for document in documents
+        if document["status"] == "ready" and document.get("embedding_version") == version
+    ]
+    corpus = {document["filename"] for document in ready} | {document["title"] for document in ready}
 
     outcomes = await _evaluate(cases, service, corpus)
     # 1. 过滤掉 blocked（语料缺失）
@@ -169,15 +183,22 @@ async def run(service: KnowledgeService) -> Report:
     ranks = {item["case"].name: item["rank"] for item in evaluated}
     # 3. 统计通过
     passed = [item for item in evaluated if item["status"] == OK]
-    # 4. 计算 MRR（平均倒数排名）只有 passed 的才计入分子，分母是全部 evaluate
-    mrr = sum(1 / item["rank"] for item in passed) / len(evaluated) if evaluated else 0.0
+    # 4. MRR 仅计算有答案的正例；无答案负例独立统计，不虚增召回指标。
+    positive = [item for item in evaluated if not item["case"].expect_empty]
+    negative = [item for item in evaluated if item["case"].expect_empty]
+    mrr = sum(1 / item["rank"] for item in positive if item["rank"]) / len(positive) if positive else 0.0
     # 5. 分档召回与名次折损：档位跟着用例声明的 top_k 走，超出它就会量到没取回来的名次
     top_k = max(case.top_k for case in cases)
     metrics = {"MRR": mrr}
-    metrics.update(
-        {f"Recall@{step}": _recall_at(evaluated, step) for step in RECALL_STEPS if step <= top_k}
-    )
-    metrics[f"nDCG@{top_k}"] = _ndcg_at(evaluated, top_k)
+    metrics.update({f"Recall@{step}": _recall_at(positive, step) for step in RECALL_STEPS if step <= top_k})
+    metrics[f"nDCG@{top_k}"] = _ndcg_at(positive, top_k)
+
+    if negative:
+        accuracy = sum(item["status"] == OK for item in negative) / len(negative)
+        metrics["NoAnswerAccuracy"] = accuracy
+        metrics["FalseAcceptanceRate"] = 1 - accuracy
+    if positive:
+        metrics["AnswerableEmptyRate"] = sum(not item["hits"] for item in positive) / len(positive)
 
     return Report(
         key="retrieval",

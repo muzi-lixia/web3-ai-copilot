@@ -2,19 +2,19 @@ import { useAppKit } from '@reown/appkit/react'
 import { useCallback, useState } from 'react'
 import { useAccount, useDisconnect, useSignMessage } from 'wagmi'
 
-import { http } from '../api/client'
-import { fetchNonce, verifySignature } from '../api/auth'
-import { useAuthStore } from '../stores/auth'
+import { http } from '../api/client.ts'
+import { fetchNonce, verifySignature } from '../api/auth.ts'
+import { useAuthStore } from '../stores/auth.ts'
 
 /** 登录流程的阶段。页面按它显示"现在卡在哪一步"。 */
 export type LoginStage = 'idle' | 'nonce' | 'signing' | 'verifying' | 'done'
 
 const STAGE_TEXT: Record<LoginStage, string> = {
-  idle: '签名并登录',
-  nonce: '正在获取签名消息…',
-  signing: '请在钱包中确认签名',
-  verifying: '正在验证签名…',
-  done: '登录成功',
+    idle: '签名并登录',
+    nonce: '正在获取签名消息…',
+    signing: '请在钱包中确认签名',
+    verifying: '正在验证签名…',
+    done: '登录成功',
 }
 
 /**
@@ -30,77 +30,81 @@ const STAGE_TEXT: Record<LoginStage, string> = {
  * 下一次点击时它自然是最新的，这段逻辑就整块消失了。
  */
 export function useWalletLogin() {
-  const { open } = useAppKit()
-  const { address, isConnected, isConnecting } = useAccount()
-  const { disconnectAsync } = useDisconnect()
-  const { signMessageAsync } = useSignMessage()
-  const setAuth = useAuthStore((state) => state.setAuth)
+    const { open } = useAppKit()
+    const { address, isConnected, isConnecting } = useAccount()
+    const { disconnectAsync } = useDisconnect()
+    const { signMessageAsync } = useSignMessage()
+    const setAuth = useAuthStore((state) => state.setAuth)
 
-  const [signingMessage, setSigningMessage] = useState<string | null>(null)
-  const [stage, setStage] = useState<LoginStage>('idle')
-  const [error, setError] = useState<string | null>(null)
+    const [signingMessage, setSigningMessage] = useState<string | null>(null)
+    const [stage, setStage] = useState<LoginStage>('idle')
+    const [error, setError] = useState<string | null>(null)
 
-  const login = useCallback(async () => {
-    setError(null)
-    setSigningMessage(null)
+    const login = useCallback(async () => {
+        setError(null)
+        setSigningMessage(null)
 
-    // 1. 还没连钱包：只负责把弹窗打开，本轮到此为止。
-    if (!isConnected || !address) {
-      open()
-      return null
+        // 1. 还没连钱包：只负责把弹窗打开，本轮到此为止。
+        if (!isConnected || !address) {
+            open()
+            return null
+        }
+
+        try {
+            // 2. 取 nonce（后端连签名原文一起下发）
+            setStage('nonce')
+            const nonce = await fetchNonce(address)
+            setSigningMessage(nonce.message)
+
+            // 3. 签名 —— 签的是后端下发的原文，不是前端拼的。
+            //    两端各拼一次模板，迟早会因为空格/换行不一致而"莫名"验签失败。
+            setStage('signing')
+            const signature = await signMessageAsync({ account: address, message: nonce.message })
+
+            // 4. 换登录凭证
+            setStage('verifying')
+            const result = await verifySignature({ message: nonce.message, signature })
+            setAuth(result.token, result.address, result.refresh_token, result)
+            setStage('done')
+            return result.address
+        } catch (err) {
+            setStage('idle')
+            const message = err instanceof Error ? err.message : '登录失败，请重试'
+            // 用户在钱包里点了"拒绝"：原样抛出会是一长串英文，这里给一句人话。
+            setError(/user rejected|denied/i.test(message) ? '你取消了签名' : message)
+            return null
+        }
+    }, [address, isConnected, open, signMessageAsync, setAuth])
+
+    const logout = useCallback(async () => {
+        try {
+            await http.delete('/auth/session')
+        } catch {
+            /* 服务不可达时仍清除本地身份 */
+        }
+        useAuthStore.getState().clearAuth('logout')
+        try {
+            await disconnectAsync()
+        } catch {
+            // 断开失败不影响本地登出：凭证已经清了，页面会回到登录页。
+        }
+        setStage('idle')
+        setError(null)
+    }, [disconnectAsync])
+
+    const busy = stage !== 'idle' && stage !== 'done'
+
+    return {
+        login,
+        logout,
+        stage,
+        stageText: STAGE_TEXT[stage],
+        signingMessage,
+        error,
+        busy,
+        /** 已连接钱包但还没换到凭证——页面据此把按钮文案切成"签名并登录"。 */
+        isConnected,
+        address,
+        isConnecting,
     }
-
-    try {
-      // 2. 取 nonce（后端连签名原文一起下发）
-      setStage('nonce')
-      const nonce = await fetchNonce(address)
-      setSigningMessage(nonce.message)
-
-      // 3. 签名 —— 签的是后端下发的原文，不是前端拼的。
-      //    两端各拼一次模板，迟早会因为空格/换行不一致而"莫名"验签失败。
-      setStage('signing')
-      const signature = await signMessageAsync({ account: address, message: nonce.message })
-
-      // 4. 换登录凭证
-      setStage('verifying')
-      const result = await verifySignature({ message: nonce.message, signature })
-      setAuth(result.token, result.address, result.refresh_token, result)
-      setStage('done')
-      return result.address
-    } catch (err) {
-      setStage('idle')
-      const message = err instanceof Error ? err.message : '登录失败，请重试'
-      // 用户在钱包里点了"拒绝"：原样抛出会是一长串英文，这里给一句人话。
-      setError(/user rejected|denied/i.test(message) ? '你取消了签名' : message)
-      return null
-    }
-  }, [address, isConnected, open, signMessageAsync, setAuth])
-
-  const logout = useCallback(async () => {
-    try { await http.delete('/auth/session') } catch { /* 服务不可达时仍清除本地身份 */ }
-    useAuthStore.getState().clearAuth('logout')
-    try {
-      await disconnectAsync()
-    } catch {
-      // 断开失败不影响本地登出：凭证已经清了，页面会回到登录页。
-    }
-    setStage('idle')
-    setError(null)
-  }, [disconnectAsync])
-
-  const busy = stage !== 'idle' && stage !== 'done'
-
-  return {
-    login,
-    logout,
-    stage,
-    stageText: STAGE_TEXT[stage],
-    signingMessage,
-    error,
-    busy,
-    /** 已连接钱包但还没换到凭证——页面据此把按钮文案切成"签名并登录"。 */
-    isConnected,
-    address,
-    isConnecting,
-  }
 }

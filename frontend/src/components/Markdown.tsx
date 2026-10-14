@@ -8,13 +8,17 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 export default function Markdown({ text }: { text: string }) {
-  return <div className="md">
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        // 模型给的链接不接管当前页；react-markdown 会把 node 塞进 props，这里剔除。
-        a: ({ node, ...rest }) => <a {...rest} target="_blank" rel="noreferrer noopener" />,
-      }}
-    >{text}</ReactMarkdown>
-  </div>
+    return (
+        <div className="md">
+            <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                    // 模型给的链接不接管当前页；react-markdown 会把 node 塞进 props，这里剔除。
+                    a: ({ node, ...rest }) => <a {...rest} target="_blank" rel="noreferrer noopener" />,
+                }}
+            >
+                {text}
+            </ReactMarkdown>
+        </div>
+    )
 }

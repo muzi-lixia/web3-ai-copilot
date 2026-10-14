@@ -200,3 +200,26 @@ expect_doc = "document.docx"
 expect_any = ["auction WBERA becomes yield"]
 top_k = 5
 
+
+# 无答案检索用例只在上述四份语料齐备时运行，防止空库造成虚假通过。
+# 扩充知识库后应检查这些问题是否仍无答案。此处检验检索拒绝，不代表生成忠实度评测。
+[[case]]
+name = "no-answer-cooking"
+query = "如何制作日式寿司醋，米醋糖盐的比例是多少"
+expect_empty = true
+requires_docs = ["bera.pdf", "what-is-berachain.md", "reward-vaults.md", "document.docx"]
+top_k = 5
+
+[[case]]
+name = "no-answer-astronomy"
+query = "詹姆斯韦布望远镜的主镜直径和拉格朗日点轨道是什么"
+expect_empty = true
+requires_docs = ["bera.pdf", "what-is-berachain.md", "reward-vaults.md", "document.docx"]
+top_k = 5
+
+[[case]]
+name = "no-answer-imaginary-protocol"
+query = "XQZ-NEBULA-999 协议的月球节点如何申请火星奖励"
+expect_empty = true
+requires_docs = ["bera.pdf", "what-is-berachain.md", "reward-vaults.md", "document.docx"]
+top_k = 5

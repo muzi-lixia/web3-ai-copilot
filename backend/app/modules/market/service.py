@@ -29,9 +29,9 @@ import httpx
 from app.common.singleflight import singleflight
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
-from app.core.resources import BusinessResources, resolve_resources
 from app.infrastructure.blockchain.chains import ChainMeta, get_chain
 from app.infrastructure.providers.market import RawQuote, fetch_defillama, fetch_dexscreener
+from app.infrastructure.resources import BusinessResources, resolve_resources
 from app.modules.asset.tokens import TokenMeta, price_address_of, tokens_for
 from app.modules.market.schemas import TokenMarket, TokenMarketList
 

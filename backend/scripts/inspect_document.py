@@ -1,18 +1,14 @@
 """离线检查一份原件经加载与清洗后剩下什么。"""
 
-import sys
+import argparse
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.modules.knowledge import cleaner, loader  # noqa: E402
+from app.workers.knowledge import cleaner, loader
 
 
 def main(path: Path) -> None:
     """打印加载出的块、清洗后剩下的块，以及清洗过程中消失的行。"""
     blocks = loader.load(path.suffix.lower(), path.read_bytes())
-    for block in blocks:
-        print(block)
     cleaned = cleaner.clean(blocks)
     print(f"{path.name}：加载 {len(blocks)} 块 → 清洗后 {len(cleaned)} 块")
 
@@ -30,4 +26,6 @@ def main(path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    parser = argparse.ArgumentParser(description="检查原件加载与清洗结果")
+    parser.add_argument("source", type=Path, help="待检查的 PDF 或 DOCX 原件路径")
+    main(parser.parse_args().source)

@@ -32,7 +32,7 @@ from app.common.schemas import DataIssue
 from app.common.units import monetary_calculation
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
-from app.core.resources import BusinessResources
+from app.infrastructure.resources import BusinessResources
 from app.modules.asset import service as asset_service
 from app.modules.asset.schemas import WalletAssets
 from app.modules.asset.tokens import RiskClass, risk_class_of

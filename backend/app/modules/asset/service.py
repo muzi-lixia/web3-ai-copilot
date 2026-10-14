@@ -20,10 +20,10 @@ from app.common.singleflight import singleflight
 from app.common.units import to_human
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
-from app.core.resources import BusinessResources
 from app.infrastructure.blockchain import client as chain_service
 from app.infrastructure.blockchain.chains import ChainMeta, get_chain
 from app.infrastructure.blockchain.client import to_checksum
+from app.infrastructure.resources import BusinessResources
 from app.modules.asset.schemas import Asset, WalletAssets
 from app.modules.asset.tokens import erc20_tokens, native_token, select_tokens
 from app.modules.asset.valuation import value_assets

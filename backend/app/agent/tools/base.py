@@ -3,7 +3,7 @@
 参数类默认跟自己的工具放在同一个文件里，只有被两个以上工具复用的才提到这里。
 """
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Arguments(BaseModel):
@@ -29,18 +29,3 @@ class PricedArguments(ChainArguments):
     """
 
     currency: str = Field(default="USD", pattern="^(USD|CNY)$", description="估值计价货币")
-
-
-class BalanceArguments(PricedArguments):
-    """指定单个币种的查询参数：在计价参数上追加一个必填符号。"""
-
-    symbol: str = Field(
-        min_length=1, max_length=64, description="精确币种符号，例如 BERA 或 WBERA；二者不可混用"
-    )
-
-    @model_validator(mode="after")
-    def contract_requires_chain(self):
-        """代币合约脱离网络无法解析，必须在参数阶段拒绝，而不是留给下游报错。"""
-        if self.symbol.startswith("0x") and self.chain_id is None:
-            raise ValueError("代币合约必须同时指定网络")
-        return self

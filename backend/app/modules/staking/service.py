@@ -35,12 +35,12 @@ from app.common.singleflight import singleflight
 from app.common.units import monetary_calculation, to_human
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
-from app.core.resources import BusinessResources
 from app.infrastructure.blockchain import client as chain_service
 from app.infrastructure.blockchain import staking_vault
 from app.infrastructure.blockchain.chains import ChainMeta, get_chain
 from app.infrastructure.blockchain.client import to_checksum
 from app.infrastructure.providers import beep
+from app.infrastructure.resources import BusinessResources
 from app.modules.asset import service as asset_service
 from app.modules.asset.tokens import TokenMeta, tokens_for
 from app.modules.market import service as market_service

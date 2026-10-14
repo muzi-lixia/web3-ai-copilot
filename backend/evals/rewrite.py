@@ -13,9 +13,9 @@
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from app.agent.models import chat_model, select_settings
+from app.agent.config import get_agent_settings
+from app.agent.llm import chat_model, select_settings
 from app.agent.rag import recent_dialogue, rewriter
-from app.core.config import get_settings
 from evals.cases import RewriteCase, load_rewrite_cases
 from evals.report import Report
 
@@ -134,7 +134,7 @@ async def run(service) -> Report:
     通过就记第 1 名，这样能直接沿用同一套基线比对。
     """
     cases = load_rewrite_cases()
-    settings = select_settings(get_settings(), PROVIDER)
+    settings = select_settings(get_agent_settings(), PROVIDER)
     async with chat_model(settings) as model:
         await _warmup(model)
         outcomes = await _evaluate(cases, model)

@@ -17,9 +17,10 @@ import asyncio
 import httpx
 from sqlalchemy import text
 
-from app.agent.models import ENDPOINTS, select_settings
-from app.core.config import get_settings
+from app.agent.config import get_agent_settings
+from app.agent.llm import ENDPOINTS, select_settings
 from app.core.exceptions import AppError
+from app.foundation.config import get_foundation_settings
 from app.infrastructure.database.session import Database
 from app.modules.knowledge.service import KnowledgeService
 from evals import report as report_module
@@ -46,7 +47,7 @@ async def _probe_embedding(settings) -> str | None:
     `trust_env=False`：不读环境变量里的代理设置，直连本机向量化服务。
     200 才算活着：能连通但返回错误码时同样不能开始评估。
     """
-    url = f"{settings.embedding_base_url.rstrip('/')}/api/tags"
+    url = f"{(settings.embedding_query_base_url or settings.embedding_base_url).rstrip('/')}/api/tags"
     try:
         async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
             response = await client.get(url)
@@ -97,7 +98,7 @@ async def _probe_model(settings, provider) -> str | None:
     return None
 
 
-async def _probe(settings, database, layer_names) -> str | None:
+async def _probe(settings, database, layer_names, agent_settings) -> str | None:
     """执行前按这次要跑的层探活：缺哪一项就直说，别让它表现成用例失败。
 
     只检查真会跑到的依赖，逐项返回第一条失败原因，都通过时返回 None：
@@ -110,11 +111,11 @@ async def _probe(settings, database, layer_names) -> str | None:
         if problem:
             return problem
     if "rewrite" in layer_names:
-        problem = await _probe_model(settings, rewrite.PROVIDER)
+        problem = await _probe_model(agent_settings, rewrite.PROVIDER)
         if problem:
             return problem
     if "routing" in layer_names:
-        problem = await _probe_model(settings, None)
+        problem = await _probe_model(agent_settings, None)
         if problem:
             return problem
     return None
@@ -122,20 +123,22 @@ async def _probe(settings, database, layer_names) -> str | None:
 
 async def main(layer_names: list[str], update_baseline: bool) -> int:
     """跑指定层并打印报告，返回进程退出码。"""
-    settings = get_settings()
-    database = Database(settings.foundation_database_url or settings.database_url)
+    settings = get_foundation_settings() if "retrieval" in layer_names else None
+    agent_settings = get_agent_settings() if set(layer_names) - {"retrieval"} else None
+    database = Database(settings.foundation_database_url) if settings else None
     try:
-        problem = await _probe(settings, database, layer_names)
+        problem = await _probe(settings, database, layer_names, agent_settings)
         if problem:
             print(f"评估无法开始：{problem}")
             return 2
         # 各层共用同一个服务实例；层内部只读，跑完语料与向量都不变。
-        service = KnowledgeService(database, settings)
+        service = KnowledgeService(database, settings) if database else None
         # 拿到各层的评估报告
         reports = [await LAYERS[name](service) for name in layer_names]
     finally:
         # 无论探活失败还是跑完，都要把连接池收干净。
-        await database.close()
+        if database:
+            await database.close()
 
     # 读取基线
     baseline = report_module.load_baseline()

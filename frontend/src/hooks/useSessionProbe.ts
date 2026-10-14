@@ -18,13 +18,13 @@ import { fetchMe } from '../api/auth.ts'
  * 后续动作由请求层的统一处理完成。
  */
 export function useSessionProbe(token: string | null) {
-  return useQuery({
-    // 同一用户更换凭据也须重新验证，不能命中上次登录的五分钟缓存。
-    queryKey: ['auth', 'me', token],
-    queryFn: fetchMe,
-    enabled: Boolean(token),
-    // 凭证无效时重试只是把同一个 401 打三遍，没有意义。
-    retry: false,
-    staleTime: 5 * 60_000,
-  })
+    return useQuery({
+        // 同一用户更换凭据也须重新验证，不能命中上次登录的五分钟缓存。
+        queryKey: ['auth', 'me', token],
+        queryFn: fetchMe,
+        enabled: Boolean(token),
+        // 凭证无效时重试只是把同一个 401 打三遍，没有意义。
+        retry: false,
+        staleTime: 5 * 60_000,
+    })
 }

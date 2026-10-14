@@ -38,10 +38,74 @@ def test_tools_do_not_import_business_services():
 def test_business_and_infrastructure_do_not_import_routes():
     for directory in ("modules", "infrastructure"):
         for path in (APP / directory).rglob("*.py"):
-            assert not any(m.startswith(("app.api", "fastapi")) for m in imports(path)), path
+            assert not any(m.startswith(("app.foundation.api", "fastapi")) for m in imports(path)), path
 
 
 def test_one_agent_runtime_and_no_redis_dependency():
     assert not (APP / "ai").exists()
-    assert "create_agent(" in (APP / "agent/service.py").read_text()
+    assert "create_agent(" in (APP / "agent/execution.py").read_text()
     assert "redis" not in (APP.parent / "pyproject.toml").read_text().lower()
+
+
+def test_http_and_business_do_not_import_worker_runtime():
+    for directory in ("foundation", "modules", "core"):
+        for path in (APP / directory).rglob("*.py"):
+            assert not any(m.startswith("app.workers") for m in imports(path)), path
+
+
+def test_workers_do_not_import_http_or_global_application_settings():
+    for path in (APP / "workers").rglob("*.py"):
+        assert not any(
+            m.startswith(("app.foundation", "app.foundation.api", "app.agent", "fastapi"))
+            for m in imports(path)
+        ), path
+
+
+def test_http_import_graph_excludes_document_processing_libraries():
+    """检查传递依赖，防止通过共享模块间接加载离线解析链路。"""
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+import app.foundation.main
+for module in sys.modules:
+    blocked = ("app.workers", "app.agent", "pdfplumber", "docx", "langchain_text_splitters")
+    assert not module.startswith(blocked), module
+""",
+        ],
+        cwd=APP.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_foundation_owns_its_http_routes_and_container():
+    assert (APP / "foundation/api/v1/auth.py").exists()
+    assert (APP / "foundation/container.py").exists()
+    assert not (APP / "api").exists()
+
+
+def test_shared_and_infrastructure_do_not_import_service_applications():
+    for directory in ("core", "common", "infrastructure"):
+        for path in (APP / directory).rglob("*.py"):
+            assert not any(m.startswith(("app.foundation", "app.agent", "app.workers"))
+                           for m in imports(path)), path
+
+
+def test_agent_does_not_import_foundation_transport():
+    for path in (APP / "agent").rglob("*.py"):
+        assert not any(m.startswith("app.foundation") for m in imports(path)), path
+
+
+def test_shared_settings_only_contain_transport_and_loader_fields():
+    from app.core.settings import HttpSettings
+
+    assert not set(HttpSettings.model_fields) & {
+        "jwt_secret", "model_provider", "agent_database_url", "rpc_overrides"
+    }

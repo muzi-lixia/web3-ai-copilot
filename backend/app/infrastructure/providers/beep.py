@@ -30,7 +30,7 @@ import httpx
 
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger
-from app.core.resources import BusinessResources, resolve_resources
+from app.infrastructure.resources import BusinessResources, resolve_resources
 
 logger = get_logger(__name__)
 

@@ -18,10 +18,10 @@
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from app.agent.models import chat_model, select_settings
-from app.agent.service import PROMPT
+from app.agent.config import get_agent_settings
+from app.agent.execution import PROMPT
+from app.agent.llm import chat_model, select_settings
 from app.agent.tools import TOOLS
-from app.core.config import get_settings
 from evals.cases import RoutingCase, load_routing_cases
 from evals.report import Report
 
@@ -191,7 +191,7 @@ async def run(service) -> Report:
     cases = load_routing_cases()
     check_names(cases)
     # provider 传 None：用部署配置的主模型，不固定提供方。
-    settings = select_settings(get_settings(), None)
+    settings = select_settings(get_agent_settings(), None)
     async with chat_model(settings) as model:
         outcomes = await _evaluate(cases, model.bind_tools(TOOLS))
     total = len(outcomes)
