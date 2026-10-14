@@ -226,8 +226,12 @@ class ContextBudget(AgentMiddleware):
             )
         call["status"] = "ok"
         call["duration_ms"] = round((time.monotonic() - started) * 1000)
+        # 这次调用新产出的结果 id：前端据此把数据挂到对应工具条目下。
+        # 只记新增 —— 合并类工具会把被并入的结果从列表里删掉，消失的不属于这次产出。
+        produced = [item.get("result_id") for item in context.results]
+        call["result_ids"] = [rid for rid in produced if rid not in before]
         # 产出了新结果就立即落库并唤醒订阅端：卡片不必等 1 秒的落库刻度。
         # 落库与通知的顺序由注入的回调保证，这里只负责「有新结果就喊一声」。
-        if [item.get("result_id") for item in context.results] != before:
+        if produced != before:
             await context.persist()
         return result

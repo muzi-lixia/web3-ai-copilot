@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { cancelTurn, clearConversation, followTurn, getTurn, loadMessages, openSession, retryTurn, submitTurn } from '../api/chat'
 import type { ChatMessage, TurnSnapshot } from '../types/api'
 import Markdown from '../components/Markdown'
-import ResultCard from '../components/ResultCard'
+import TurnResult from '../components/TurnResult'
 import { ApiError } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { saveChatCache } from '../utils/chatCache'
@@ -236,21 +236,21 @@ function Workspace() {
             {sentAt && <div className="me-t">{sentAt}</div>}</div>
         </div>
         const speaking = ['queued', 'running'].includes(item.status)
-        // 「结果」块顶部那句模型话；还没吐字时用三点流动占位，有正文后只剩正文（不再挂光标）。
-        const say = (item.content || speaking) ? <div className="res-say">{item.content
-          ? <Markdown text={item.content} />
-          : <span className="stream-cursor"><i /><i /><i /></span>}</div> : null
+        // 「结果」块顶部那句模型话。三点跟着生成状态走：还没吐字时它就是唯一内容，
+        // 出了正文后接在正文下方继续表示还在生成 —— 模型调工具期间正文会停住不动。
+        const say = (item.content || speaking) ? <div className="res-say">
+          {item.content && <Markdown text={item.content} />}
+          {speaking && <span className="stream-cursor"><i /><i /><i /></span>}
+        </div> : null
         // 回答区固定两段：结果常显，数据来源与明细折叠；纯文字回答只有结果块。
         // 流式期间只给模型正文，数据来源与工具调用等输出结束再出现。
         return <div className="msg" key={item.id}>
           <div className="av ai">AI</div>
           <div className="ans">
-            {itemResults.length
-              // 流式期间只渲染首张（承载正文）；多结果里其余卡此刻既无正文也无折叠区，
-              // 渲染出来就是个空格子。等输出结束再一起出现。
-              ? (speaking ? itemResults.slice(0, 1) : itemResults)
-                .map((result, index) => <ResultCard key={result.result_id} result={result}
-                  say={index === 0 ? say : null} toolMeta={index === 0 ? item.tool_meta : undefined} streaming={speaking} />)
+            {/* 流式期间只给模型正文：数据与工具条目等输出结束再出现，免得正文还在写、
+                下面已经跳起来了。没有结果时同样只有正文块。 */}
+            {!speaking && itemResults.length
+              ? <TurnResult say={say} results={itemResults} toolMeta={item.tool_meta} />
               : <div className="blk"><div className="blk-b">{say}</div></div>}
             {STATUS[item.status] && item.turn_id !== pendingTurn && <div className="message-status">{STATUS[item.status]}</div>}
           </div>

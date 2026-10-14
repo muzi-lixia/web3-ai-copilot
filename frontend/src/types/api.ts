@@ -245,7 +245,7 @@ export interface ChatSession {
 
 /* Result：一次回答里随消息下发的业务结果。信封（所有 kind 通用）+ body（按 kind 判别）。 */
 
-/** 结果种类；加新类型要动三处：这里、body、前端 ResultCard 的分发（漏了会落进兜底渲染）。 */
+/** 结果种类；加新类型要动三处：这里、body、前端 SourceDetail 的分发（漏了会落进兜底渲染）。 */
 export type ResultKind = 'balance' | 'price' | 'aggregate' | 'knowledge'
 export type ResultStatus = 'complete' | 'partial' | 'failed'
 
@@ -344,13 +344,15 @@ export type BalanceLikeResult = BalanceResult | AggregateResult
  */
 export type CopilotResult = ResultEnvelope & { kind: string; body: unknown }
 
-/** 一次工具调用的元信息：工具名、参数、耗时、状态。 */
+/** 一次工具调用的元信息：工具名、参数、耗时、状态，以及它产出的数据。 */
 export interface ToolCallMeta {
   tool: string
   args?: Record<string, unknown>
   duration_ms?: number
   status?: string
   error_code?: string
+  /** 这次调用新产出的结果 id；合并类工具会把被并入的结果删掉，那些 id 不在其中。 */
+  result_ids?: string[]
 }
 /** 整轮的工具调用元信息；与单条结果是一对多，所以不塞进结果里。 */
 export interface ToolMeta {

@@ -1099,6 +1099,43 @@ a {
   word-break: break-all;
   line-height: 1.6
 }
+/* 工具条目下的数据引用：默认收起。展开后是该工具产出的数据本体
+   （余额明细 / 行情来源 / 知识片段），所以这里自带边框，不跟工具条目抢。 */
+.tcf {
+  margin-top: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255,255,255,.012)
+}
+.tcf>summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--tx-3);
+  list-style: none;
+  cursor: pointer;
+  user-select: none
+}
+.tcf>summary::-webkit-details-marker {
+  display: none
+}
+.tcf>summary:hover {
+  background: rgba(255,255,255,.04)
+}
+.tcf>summary .arw {
+  width: 8px;
+  height: 10px;
+  flex: none;
+  background: var(--tx-3);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  transition: .15s
+}
+.tcf[open]>summary .arw {
+  transform: rotate(90deg)
+}
 .blk-f {
   display: flex;
   gap: 8px;
@@ -1220,13 +1257,17 @@ a {
   font-size: 11px!important;
   line-height: 1.7
 }
-/* 等待模型首个 token 时的「三点流动」：三个点依次上浮再落下，形成流动感。 */
+/* 生成中的「三点流动」：三个点依次上浮再落下，形成流动感。 */
 .stream-cursor {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   height: 13px;
   vertical-align: middle
+}
+/* 跟在正文后面时留一点间距：正文末段的下边距被 .md 清成了 0。 */
+.md + .stream-cursor {
+  margin-top: 4px
 }
 .stream-cursor i {
   width: 4px;
