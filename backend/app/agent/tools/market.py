@@ -30,7 +30,7 @@ async def get_chain_info(runtime: ToolRuntime[RunContext], chain_id: int | None 
 @tool(
     args_schema=BalanceArguments,
     description="""查询代币公开市场行情价格，用于回答「X 多少钱」。该数据为市场价格，不是用户钱包持仓余额。
-                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。
+                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 query_assets。
                 每次调用实时拉取最新行情，无缓存，不可复用对话历史内旧行情数据。""",
 )
 async def get_token_price(

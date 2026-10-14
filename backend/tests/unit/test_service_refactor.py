@@ -151,8 +151,8 @@ class QueryModel(BaseChatModel):
                 content="",
                 tool_calls=[
                     {
-                        "name": "get_my_token_balance",
-                        "args": {"symbol": "BERA", "chain_id": 80094},
+                        "name": "query_assets",
+                        "args": {"symbols": ["BERA"], "chain_id": 80094},
                         "id": "call_test",
                         "type": "tool_call",
                     }

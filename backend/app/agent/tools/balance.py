@@ -1,16 +1,32 @@
-"""资产类查询工具：走基础服务 /me/balance-results，结果落库并出卡片。
-
-信封与 body 由基础服务的 results.py 产出，这里只负责转发并把两份投影分流。
-"""
+"""本人资产工具：余额查询交给 assets 子图，结果汇总交给基础服务聚合。"""
 
 import json
 
 from langchain.tools import ToolRuntime, tool
-from pydantic import Field
+from langgraph.constants import CONFIG_KEY_CHECKPOINTER
+from pydantic import Field, model_validator
 
+from app.agent.assets import ASSETS_GRAPH
 from app.agent.context import RunContext
-from app.agent.tools.base import Arguments, BalanceArguments, OverviewArguments, query
+from app.agent.tools.base import Arguments, PricedArguments
 from app.core.logging import span
+
+
+class AssetsArguments(PricedArguments):
+    """余额查询参数：币种可多可空，空即整体概览。"""
+
+    symbols: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="用户点到的币种符号或代币合约地址；没有点名币种时留空，表示查全部持仓概览",
+    )
+
+    @model_validator(mode="after")
+    def contract_requires_chain(self):
+        """代币合约脱离网络无法解析，必须在参数阶段拒绝，而不是留给下游报错。"""
+        if any(item.startswith("0x") for item in self.symbols) and self.chain_id is None:
+            raise ValueError("代币合约必须同时指定网络")
+        return self
 
 
 class AggregateArguments(Arguments):
@@ -21,63 +37,42 @@ class AggregateArguments(Arguments):
 
 
 @tool(
-    args_schema=OverviewArguments,
-    description="""查询当前钱包预收录代币的余额概览。
-                能力限制：仅查询预收录代币，无法查询未收录合约代币、部分NFT；每次调用实时拉取链上数据，无缓存，不能复用历史余额结果。
-                适用场景：用户查询全部持仓汇总、整体资产概览，未指定单个或多个代币。
-                禁止场景：用户明确点名查询一个/多个指定币种（如查USDC余额、ETH持仓），此时必须调用 get_my_token_balance，禁止调用本工具；其他未指明查询余额概览的场景禁止使用""",
-)
-async def get_my_balance_overview(
-    runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
-):
-    """查询本人已登记代币余额概览。
-                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。其他未指明查询行情价格的场景禁止使用。
-
-    Args:
-        runtime: 框架注入的可信身份及 HTTP 客户端，模型不可填写。
-        chain_id: 可选网络；不传查询全部登记网络。
-        currency: 估值展示单位，USD 或 CNY。
-    Returns:
-        查询范围、完整性和结果引用。真实数值由前端读取基础服务结果。
-    """
-    return await query(runtime, "get_my_balance_overview", {"chain_id": chain_id, "currency": currency})
-
-
-@tool(
-    args_schema=BalanceArguments,
-    description="""查询本人指定单个币种的余额。
-                适用场景：用户询问「我的余额」「我有多少 X」「我持有多少X」时使用。
-                禁止场景：仅询问「X 多少钱」时，改用 get_token_price。查询全部钱包资产汇总概览时，改用 get_my_balance_overview。其他未指明查询用户余额的场景禁止使用。
-                特殊规则：BERA与WBERA相互独立，不会自动互相转换；严格按用户指定币种查询，不猜测，不扩大范围。
+    args_schema=AssetsArguments,
+    description="""查询本人钱包的余额：点名了币种就逐个查，没点名就查全部持仓概览。
+                适用场景：用户询问「我的余额」「我有多少 X」「我持有多少X」「我一共有多少资产」。
+                参数约定：用户点到的币种填进 symbols，一个也没点到时留空，不要为此追问。
+                禁止场景：仅询问「X 多少钱」时，改用 get_token_price；询问平台支持哪些链和币时，改用 get_chain_info。
+                特殊规则：BERA与WBERA相互独立，不会自动互相转换；严格按用户点到的币种查询，不猜测，不扩大范围。
                 每次调用实时拉取链上数据，不得沿用对话历史中的旧余额。""",
 )
-async def get_my_token_balance(
-    symbol: str, runtime: ToolRuntime[RunContext], chain_id: int | None = None, currency: str = "USD"
+async def query_assets(
+    runtime: ToolRuntime[RunContext],
+    symbols: list[str] | None = None,
+    chain_id: int | None = None,
+    currency: str = "USD",
 ):
-    """查询指定代币余额，身份只能来自运行上下文。
-                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。其他未指明查询用户余额的场景禁止使用。
+    """查询本人余额：一次调用取回一个或多个币种，也可以取整体概览。
 
     Args:
-        symbol: 用户明确指定的符号。
-        runtime: 可信上下文，不进入模型 schema。
-        chain_id: 网络，未明确时先由对话上下文确定。
+        runtime: 上下文
+        symbols: 用户点到的币种符号或合约地址；留空表示查全部已登记代币的概览。
+        chain_id: 网络；点名币种时省略则用部署默认网络。
         currency: 估值展示单位，USD 或 CNY。
     Returns:
-        安全元数据和结果引用，不返回余额正文。
+        每条结果的摘要与取数失败说明；真实数值由前端读取基础服务结果。
     """
-    if chain_id is None:
-        # 模型没给网络时用部署默认网络，而不是让下游猜。
-        chain_id = runtime.context.client.default_chain_id
-    return await query(
-        runtime,
-        "get_my_token_balance",
+    state = await ASSETS_GRAPH.ainvoke(
         {
+            "symbols": list(symbols or ()),
             "chain_id": chain_id,
             "currency": currency,
-            # 合约地址大小写敏感，保持原样；符号统一大写后再去匹配注册表。
-            "symbol": symbol.strip() if symbol.startswith("0x") else symbol.strip().upper(),
         },
+        # 上下文走运行上下文通道，不进 state —— 与主图 create_agent(context_schema=...) 一致。
+        context=runtime.context,
+        # 子图不落快照：显式切断从父 run 继承来的 checkpointer。
+        config={"configurable": {CONFIG_KEY_CHECKPOINTER: None}},
     )
+    return state["reply"]
 
 
 @tool(
@@ -88,7 +83,6 @@ async def get_my_token_balance(
 )
 async def aggregate_results(result_ids: list[str], runtime: ToolRuntime[RunContext], currency: str = "USD"):
     """汇总已经生成的业务结果。
-                禁止场景：用户询问「我有多少 X」「我的 X 余额」时，改用 get_my_token_balance。其他未指明查询用户余额的场景禁止使用。
 
     Args:
         result_ids: 必须属于当前用户当前对话，不能凭空编造。

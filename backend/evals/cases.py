@@ -6,8 +6,9 @@
 """
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # 用例文件所在的默认目录，与本模块同级；文件名按层命名（如 retrieval.toml）。
 CASES_DIR = Path(__file__).with_name("cases")
@@ -178,8 +179,9 @@ def load_rewrite_cases(path: Path | None = None) -> list[RewriteCase]:
 class RoutingCase:
     """一条工具路由用例。
 
-    断言落在「这一轮该调哪个工具」上，不看措辞也不看参数 —— 参数填得对不对由各工具
-    自己的校验兜住，不在这一层量。三条期望至少要写一条，只写问题不写期望无从判定。
+    断言落在「这一轮该调哪个工具、参数填得对不对」上，不看措辞。参数的格式（类型、
+    取值范围）由工具自己的 schema 兜住，兜不住的是「该不该填」—— 点了币种却没填、
+    没点却硬填，这类只能在这一层量，所以有了 `expect_args`。
 
     字段：
     - `name`        用例名，报告与基线比对都按它定位，必须唯一。
@@ -196,6 +198,10 @@ class RoutingCase:
     - `max_calls`
       首轮调用条数的上限，缺省表示不限制。用来量**过度调用**：一个问题一次就够时
       写 1，多调一个「既不在期望、也不在禁区」的工具同样算错 —— 只写禁区卡不住它。
+    - `expect_args`
+      期望该工具收到的参数，按子集比对（默认值等价于省略，写 `symbols = []` 时
+      模型整条不传也算对）。只在需要区分「填什么」的用例上写 —— 它回答不了
+      「该调哪个工具」，所以必须同时写 `expect_tools`。
     - `expected_fail`
       标的是**已知缺口**：期望合理、当前模型确实选不对，且原因写在 note 里。
       它不把整轮判成失败；等它真能选对了，报告会提醒移除这个标记。
@@ -211,6 +217,7 @@ class RoutingCase:
     forbid_tools: tuple[str, ...]
     expect_no_tools: bool = False
     max_calls: int | None = None
+    expect_args: dict[str, Any] = field(default_factory=dict)
     expected_fail: bool = False
     note: str = ""
 
@@ -225,6 +232,7 @@ def load_routing_cases(path: Path | None = None) -> list[RoutingCase]:
     - `query` 不能为空，且三条期望至少要写一条；
     - `expect_no_tools` 不能与 `expect_tools` 同时写：一个要求不调、一个要求必调；
     - `max_calls` 写了就要 ≥ 1（要「一个都不调」就写 `expect_no_tools`）；
+    - `expect_args` 写了就要同时写 `expect_tools` —— 否则不知道该比对哪一次调用；
     - `history` 里的角色只能是 user / assistant。
 
     工具名对不对不在这里查：那需要工具注册表，本模块只读用例文件。
@@ -248,6 +256,10 @@ def load_routing_cases(path: Path | None = None) -> list[RoutingCase]:
         max_calls = item.get("max_calls")
         if max_calls is not None and int(max_calls) < 1:
             raise ValueError(f"用例 {name} 的 max_calls 必须至少为 1：{max_calls!r}")
+        # expect_args 缺省为空表：只比对写出来的键，其余参数不限制。
+        expect_args = dict(item.get("expect_args") or {})
+        if expect_args and not expect_tools:
+            raise ValueError(f"用例 {name} 写了 expect_args 却没写 expect_tools，无从比对")
         # 只写问题、不写任何期望的用例无法判定，直接报错而不是当成必然失败。
         if not query or not (expect_tools or forbid_tools or expect_no_tools or max_calls):
             raise ValueError(f"用例 {name} 缺少问题或期望")
@@ -262,6 +274,7 @@ def load_routing_cases(path: Path | None = None) -> list[RoutingCase]:
                 forbid_tools=forbid_tools,
                 expect_no_tools=expect_no_tools,
                 max_calls=int(max_calls) if max_calls is not None else None,
+                expect_args=expect_args,
                 expected_fail=bool(item.get("expected_fail", False)),
                 note=str(item.get("note") or ""),
             )

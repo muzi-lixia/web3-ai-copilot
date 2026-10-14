@@ -26,8 +26,7 @@ def _estimate_tokens(text: str) -> int:
 LIVE_TOOLS = frozenset(
     {
         "get_token_price",
-        "get_my_balance_overview",
-        "get_my_token_balance",
+        "query_assets",
         "aggregate_results",
     }
 )

@@ -1,13 +1,9 @@
-"""工具公共基座：跨文件复用的参数类，以及走 ResultService 的查询出口。
+"""工具公共基座：跨文件复用的参数类。
 
 参数类默认跟自己的工具放在同一个文件里，只有被两个以上工具复用的才提到这里。
 """
 
-import json
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from app.core.logging import span
 
 
 class Arguments(BaseModel):
@@ -26,8 +22,8 @@ class ChainArguments(Arguments):
     chain_id: int | None = Field(default=None, gt=0, description="链 ID，省略查询已支持网络")
 
 
-class OverviewArguments(ChainArguments):
-    """概览类查询参数：网络可选，另加展示货币。
+class PricedArguments(ChainArguments):
+    """在网络之上追加计价货币。
 
     currency 用 pattern 收窄成两种取值，避免模型传入后端无法换算的货币代码。
     """
@@ -35,8 +31,8 @@ class OverviewArguments(ChainArguments):
     currency: str = Field(default="USD", pattern="^(USD|CNY)$", description="估值计价货币")
 
 
-class BalanceArguments(OverviewArguments):
-    """指定币种的查询参数：在概览参数上追加一个必填符号。"""
+class BalanceArguments(PricedArguments):
+    """指定单个币种的查询参数：在计价参数上追加一个必填符号。"""
 
     symbol: str = Field(
         min_length=1, max_length=64, description="精确币种符号，例如 BERA 或 WBERA；二者不可混用"
@@ -48,26 +44,3 @@ class BalanceArguments(OverviewArguments):
         if self.symbol.startswith("0x") and self.chain_id is None:
             raise ValueError("代币合约必须同时指定网络")
         return self
-
-
-async def query(runtime, name, payload):
-    """查询类工具的唯一出口：转发基础服务、登记结果引用，只把摘要交给模型。
-
-    Args:
-        runtime: 带可信身份的框架上下文；身份不来自模型参数。
-        name: 工具名，仅用于埋点。
-        payload: 发送给基础服务的业务参数。
-    Returns:
-        基础服务返回的摘要 JSON（含金额与余额，不含地址与合约）；
-        完整结果进展示通道，随快照下发给前端。
-    """
-    # 身份与凭证只从 run context 取，不经过任何模型参数。
-    context = runtime.context
-    with span("tool.completed", tool=name):
-        # 基础服务一次返回两份投影：summary（给模型）与 result（给前端）。
-        meta = await context.client.request("POST", "/me/balance-results", context.token, json=payload)
-        result_id = meta["result"]["result_id"]
-        await context.repository.add_ref(context.user_id, context.conversation_id, result_id)
-        context.results.append(meta["result"])
-        # 模型只收到白名单摘要；业务数据走 results，不进模型消息。
-        return json.dumps(meta["summary"], ensure_ascii=False)
